@@ -36,7 +36,7 @@ app.config['MAIL_SERVER'] = 'smtp.mail.ru'
 app.config['MAIL_PORT'] = 465
 app.config['MAIL_USE_SSL'] = True
 app.config['MAIL_USERNAME'] = 'mcrmateucraft@mail.ru'  # Замените на вашу почту
-app.config['MAIL_PASSWORD'] = 'f6wkngtymAFi2BVxa4Iy'  # Замените на ваш пароль
+app.config['MAIL_PASSWORD'] = 'Q9r82JWjkJeUIfqmIdWL'  # Замените на ваш пароль
 app.config['MAIL_DEFAULT_SENDER'] = 'MateuGram <mcrmateucraft@mail.ru>'
 
 db = SQLAlchemy(app)
@@ -2028,5 +2028,6 @@ if __name__ == '__main__':
     print("="*60)
     port = int(os.environ.get('PORT', 8321))
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
 
