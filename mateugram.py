@@ -1,6 +1,6 @@
 """
 MateuGram - Синяя социальная сеть
-Версия с администратором и блокировкой пользователей
+Версия с администратором и блокировкой пользователей и с новыми функциями.
 """
 
 from flask import Flask, render_template_string, request, redirect, url_for, flash, get_flashed_messages
@@ -2039,6 +2039,7 @@ if __name__ == '__main__':
     print("="*60)
     port = int(os.environ.get('PORT', 8321))
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
 
 
