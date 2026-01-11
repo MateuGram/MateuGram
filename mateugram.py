@@ -977,9 +977,13 @@ def login():
                 flash('❌ Ваш аккаунт заблокирован администратором', 'error')
                 return redirect('/login')
             
-            if not user.email_verified:
-                flash('Подтвердите email для входа', 'error')
-                return redirect(f'/verify_email/{user.id}')
+           if not user.email_verified:
+    # АВТОМАТИЧЕСКИ подтверждаем email (для тестирования)
+    user.email_verified = True
+    user.verification_code = None
+    db.session.commit()
+    flash('✅ Email автоматически подтвержден', 'success')
+    # Продолжаем вход
             
             login_user(user, remember=True)
             
@@ -2035,6 +2039,7 @@ if __name__ == '__main__':
     print("="*60)
     port = int(os.environ.get('PORT', 8321))
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
 
 
