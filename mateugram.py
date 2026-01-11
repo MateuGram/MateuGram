@@ -18,7 +18,7 @@ from email.mime.multipart import MIMEMultipart
 
 # ========== НАСТРОЙКА ПРИЛОЖЕНИЯ ==========
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'mateugram-secret-key-2024-change-this'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'mateugram-secret-key-2024-change-this')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///mateugram_admin.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -2026,5 +2026,7 @@ if __name__ == '__main__':
     print("   4. 📊 Система жалоб и модерации")
     print("   5. 💬 Личные сообщения с фильтрацией заблокированных")
     print("="*60)
-    
-    app.run(debug=True, port=5000, use_reloader=False)
+    port = int(os.environ.get('PORT', 8321))
+    app.run(host='0.0.0.0', port=port, debug=False)
+
+
