@@ -18,6 +18,18 @@ from email.mime.multipart import MIMEMultipart
 
 # ========== НАСТРОЙКА ПРИЛОЖЕНИЯ ==========
 app = Flask(__name__)
+
+# Простой тестовый маршрут
+@app.route('/test')
+def test():
+    return '✅ MateuGram работает! Resend: ' + ('Настроен' if os.environ.get('RESEND_API_KEY') else 'Не настроен')
+
+@app.route('/health')
+def health():
+    return 'OK', 200
+
+# ========== НАСТРОЙКА ПРИЛОЖЕНИЯ ==========
+# ... ваш текущий код
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'mateugram-secret-key-2024-change-this')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///mateugram_admin.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -831,6 +843,7 @@ def render_page(title, content):
     )
 
 # ========== МАРШРУТЫ ==========
+
 @app.route('/')
 def index():
     if current_user.is_authenticated:
@@ -2028,6 +2041,7 @@ if __name__ == '__main__':
     print("="*60)
     port = int(os.environ.get('PORT', 8321))
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
 
 
