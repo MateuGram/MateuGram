@@ -1289,9 +1289,11 @@ def following():
     
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
+        <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/following" class="nav-btn active">👥 Подписки</a>
         <a href="/followers" class="nav-btn">👤 Подписчики</a>
-        <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/profile/{current_user.id}" class="nav-btn">👤 Мой профиль</a>
         {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
         <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
@@ -1347,9 +1349,11 @@ def followers():
     
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
+        <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/following" class="nav-btn">👥 Подписки</a>
         <a href="/followers" class="nav-btn active">👤 Подписчики</a>
-        <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/profile/{current_user.id}" class="nav-btn">👤 Мой профиль</a>
         {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
         <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
@@ -1422,7 +1426,19 @@ def edit_profile():
         flash('✅ Профиль успешно обновлен', 'success')
         return redirect(f'/profile/{user.id}')
     
-    content = f'''<div class="card">
+    content = f'''<div class="nav-menu">
+        <a href="/feed" class="nav-btn">📰 Лента</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
+        <a href="/users" class="nav-btn">👥 Все пользователи</a>
+        <a href="/following" class="nav-btn">👥 Подписки</a>
+        <a href="/followers" class="nav-btn">👤 Подписчики</a>
+        <a href="/edit_profile" class="nav-btn active">✏️ Редактировать</a>
+        {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
+        <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
+    </div>
+
+    <div class="card">
         <h2 style="color: #2a5298; margin-bottom: 25px;">Редактирование профиля</h2>
         
         <form method="POST" action="/edit_profile" enctype="multipart/form-data">
@@ -1520,7 +1536,19 @@ def create_post():
         flash('✅ Пост опубликован', 'success')
         return redirect('/feed')
     
-    content = f'''<div class="card">
+    content = f'''<div class="nav-menu">
+        <a href="/feed" class="nav-btn">📰 Лента</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
+        <a href="/users" class="nav-btn">👥 Все пользователи</a>
+        <a href="/following" class="nav-btn">👥 Подписки</a>
+        <a href="/followers" class="nav-btn">👤 Подписчики</a>
+        <a href="/create_post" class="nav-btn active">📝 Создать пост</a>
+        {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
+        <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
+    </div>
+
+    <div class="card">
         <h2 style="color: #2a5298; margin-bottom: 25px;">Создать пост</h2>
         
         <form method="POST" action="/create_post" enctype="multipart/form-data">
@@ -1657,6 +1685,8 @@ def feed():
             <a href="/create_post" class="btn">📝 Создать пост</a>
             <a href="/edit_profile" class="btn btn-secondary" style="margin-left: 10px;">👤 Профиль</a>
             <a href="/following" class="btn btn-follow" style="margin-left: 10px;">👥 Подписки</a>
+            <a href="/messages" class="btn" style="margin-left: 10px;">💬 Сообщения</a>
+            {f'<a href="/admin/users" class="btn" style="background: #6f42c1; margin-left: 10px;">👑 Админ</a>' if current_user.is_admin else ''}
             <a href="/logout" class="btn btn-danger" style="margin-left: 10px;">🚪 Выйти</a>
         </div>
     </div>
@@ -1814,7 +1844,18 @@ def profile(user_id):
             </div>
         </div>'''
     
-    content = f'''<div class="profile-header">
+    content = f'''<div class="nav-menu">
+        <a href="/feed" class="nav-btn">📰 Лента</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
+        <a href="/users" class="nav-btn">👥 Все пользователи</a>
+        <a href="/following" class="nav-btn">👥 Подписки</a>
+        <a href="/followers" class="nav-btn">👤 Подписчики</a>
+        {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
+        <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
+    </div>
+
+    <div class="profile-header">
         <img src="/static/uploads/{user.avatar_filename}" class="profile-avatar">
         <div class="profile-info">
             <h2>{user.first_name} {user.last_name}</h2>
@@ -1908,7 +1949,18 @@ def messages(receiver_id):
             <div class="message-content">{get_emoji_html(msg.content)}</div>
         </div>'''
     
-    content = f'''<div class="card">
+    content = f'''<div class="nav-menu">
+        <a href="/feed" class="nav-btn">📰 Лента</a>
+        <a href="/messages" class="nav-btn active">💬 Сообщения</a>
+        <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
+        <a href="/users" class="nav-btn">👥 Все пользователи</a>
+        <a href="/following" class="nav-btn">👥 Подписки</a>
+        <a href="/followers" class="nav-btn">👤 Подписчики</a>
+        {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
+        <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
+    </div>
+
+    <div class="card">
         <h2 style="color: #2a5298; margin-bottom: 25px;">💬 Диалог с {receiver.first_name} {receiver.last_name}</h2>
         
         <div style="max-height: 400px; overflow-y: auto; margin-bottom: 20px;">
@@ -1963,7 +2015,18 @@ def messages_list():
             </div>
         </div>'''
     
-    content = f'''<div class="card">
+    content = f'''<div class="nav-menu">
+        <a href="/feed" class="nav-btn">📰 Лента</a>
+        <a href="/messages" class="nav-btn active">💬 Сообщения</a>
+        <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
+        <a href="/users" class="nav-btn">👥 Все пользователи</a>
+        <a href="/following" class="nav-btn">👥 Подписки</a>
+        <a href="/followers" class="nav-btn">👤 Подписчики</a>
+        {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
+        <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
+    </div>
+
+    <div class="card">
         <h2 style="color: #2a5298; margin-bottom: 25px;">💬 Личные сообщения</h2>
         
         <div style="margin-bottom: 20px;">
@@ -2079,7 +2142,18 @@ def blocked_users():
     else:
         blocked_html = '<p style="text-align: center; color: #666; padding: 20px;">Вы никого не заблокировали.</p>'
     
-    content = f'''<div class="card">
+    content = f'''<div class="nav-menu">
+        <a href="/feed" class="nav-btn">📰 Лента</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/blocked_users" class="nav-btn active">🚫 Заблокированные</a>
+        <a href="/users" class="nav-btn">👥 Все пользователи</a>
+        <a href="/following" class="nav-btn">👥 Подписки</a>
+        <a href="/followers" class="nav-btn">👤 Подписчики</a>
+        {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
+        <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
+    </div>
+
+    <div class="card">
         <h2 style="color: #2a5298; margin-bottom: 20px;">🚫 Заблокированные пользователи</h2>
         
         {blocked_html}
@@ -2162,7 +2236,18 @@ def users():
     else:
         users_html = '<p style="text-align: center; color: #666; padding: 40px;">Пользователи не найдены.</p>'
     
-    content = f'''<div class="card">
+    content = f'''<div class="nav-menu">
+        <a href="/feed" class="nav-btn">📰 Лента</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
+        <a href="/users" class="nav-btn active">👥 Все пользователи</a>
+        <a href="/following" class="nav-btn">👥 Подписки</a>
+        <a href="/followers" class="nav-btn">👤 Подписчики</a>
+        {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
+        <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
+    </div>
+
+    <div class="card">
         <h2 style="color: #2a5298; margin-bottom: 25px;">👥 Пользователи MateuGram</h2>
         
         <form method="GET" action="/users" style="margin-bottom: 25px;">
@@ -2241,6 +2326,9 @@ def admin_users():
     
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
+        <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/admin/users" class="nav-btn active" style="background: #6f42c1; border-color: #6f42c1;">👑 Управление пользователями</a>
         <a href="/admin/reports" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">📊 Жалобы</a>
         <a href="/admin/admins" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Администраторы</a>
@@ -2452,6 +2540,9 @@ def admin_admins():
     
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
+        <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Пользователи</a>
         <a href="/admin/admins" class="nav-btn active" style="background: #6f42c1; border-color: #6f42c1;">👑 Администраторы</a>
         <a href="/admin/reports" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">📊 Жалобы</a>
@@ -2550,6 +2641,9 @@ def admin_reports():
     
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
+        <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Пользователи</a>
         <a href="/admin/admins" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Администраторы</a>
         <a href="/admin/reports" class="nav-btn active" style="background: #6f42c1; border-color: #6f42c1;">📊 Жалобы</a>
