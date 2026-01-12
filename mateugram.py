@@ -11,10 +11,8 @@ from werkzeug.utils import secure_filename
 import re
 import secrets
 import os
+import json
 from datetime import datetime
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 # ========== НАСТРОЙКА ПРИЛОЖЕНИЯ ==========
 app = Flask(__name__)
@@ -168,7 +166,6 @@ def save_file(file, file_type='image'):
 
 def parse_media_list(media_string):
     """Парсит JSON строку с медиа файлами"""
-    import json
     try:
         if media_string:
             return json.loads(media_string)
@@ -207,6 +204,18 @@ def get_emoji_html(content):
         content = content.replace(code, emoji)
     
     return content
+
+def is_user_blocked(blocker_id, blocked_id):
+    """Проверяет, заблокировал ли пользователь другого пользователя"""
+    return BlockedUser.query.filter_by(blocker_id=blocker_id, blocked_id=blocked_id).first() is not None
+
+def get_like_count(post_id):
+    """Получает количество лайков поста"""
+    return Like.query.filter_by(post_id=post_id).count()
+
+def get_comment_count(post_id):
+    """Получает количество комментариев поста"""
+    return Comment.query.filter_by(post_id=post_id).count()
 
 # ========== HTML ШАБЛОНЫ ==========
 BASE_HTML = '''<!DOCTYPE html>
@@ -290,6 +299,178 @@ BASE_HTML = '''<!DOCTYPE html>
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(42, 82, 152, 0.3);
         }}
+        .btn-secondary {{
+            background: #6c757d;
+        }}
+        .btn-success {{
+            background: #28a745;
+        }}
+        .btn-warning {{
+            background: #ffc107;
+            color: #212529;
+        }}
+        .btn-danger {{
+            background: #dc3545;
+        }}
+        .btn-admin {{
+            background: #6f42c1;
+        }}
+        .btn-block {{
+            background: #fd7e14;
+        }}
+        .btn-report {{
+            background: #ff6b6b;
+        }}
+        .btn-like {{
+            background: #e83e8c;
+        }}
+        .btn-comment {{
+            background: #20c997;
+        }}
+        .btn-small {{
+            padding: 6px 12px;
+            font-size: 14px;
+        }}
+        .alert {{
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border-left: 5px solid;
+        }}
+        .alert-success {{
+            background: #d4edda;
+            border-color: #28a745;
+            color: #155724;
+        }}
+        .alert-error {{
+            background: #f8d7da;
+            border-color: #dc3545;
+            color: #721c24;
+        }}
+        .alert-info {{
+            background: #d1ecf1;
+            border-color: #17a2b8;
+            color: #0c5460;
+        }}
+        .alert-warning {{
+            background: #fff3cd;
+            border-color: #ffc107;
+            color: #856404;
+        }}
+        .post {{
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 15px;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.08);
+            position: relative;
+        }}
+        .post.hidden {{
+            background: #f8f9fa;
+            opacity: 0.7;
+        }}
+        .post-header {{
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+        }}
+        .avatar {{
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            object-fit: cover;
+            margin-right: 12px;
+            border: 2px solid #2a5298;
+        }}
+        .post-author {{
+            font-weight: 600;
+            color: #2a5298;
+        }}
+        .post-time {{
+            color: #888;
+            font-size: 0.9em;
+            margin-left: auto;
+        }}
+        .post-content {{
+            line-height: 1.6;
+            margin-bottom: 15px;
+        }}
+        .post-actions {{
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }}
+        .post-stats {{
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+            color: #666;
+            font-size: 0.9em;
+        }}
+        .post-stats span {{
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }}
+        .comments-section {{
+            margin-top: 20px;
+            border-top: 1px solid #eee;
+            padding-top: 15px;
+        }}
+        .comment {{
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 12px;
+            margin-bottom: 10px;
+            border-left: 3px solid #2a5298;
+        }}
+        .comment-header {{
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            font-size: 0.9em;
+            color: #666;
+        }}
+        .comment-content {{
+            line-height: 1.4;
+        }}
+        .comment-actions {{
+            display: flex;
+            gap: 5px;
+            margin-top: 8px;
+        }}
+        .message {{
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-left: 4px solid #2a5298;
+        }}
+        .message.hidden {{
+            background: #f1f1f1;
+            opacity: 0.7;
+        }}
+        .message.sent {{
+            background: #e3f2fd;
+            border-left-color: #2196f3;
+            margin-left: 50px;
+        }}
+        .message.received {{
+            background: #f1f8e9;
+            border-left-color: #4caf50;
+            margin-right: 50px;
+        }}
+        .message-header {{
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 0.9em;
+            color: #666;
+        }}
+        .message-content {{
+            line-height: 1.5;
+        }}
         .emoji-picker {{
             background: white;
             border: 1px solid #ddd;
@@ -369,6 +550,52 @@ BASE_HTML = '''<!DOCTYPE html>
             height: 200px;
             object-fit: cover;
         }}
+        .profile-header {{
+            display: flex;
+            align-items: center;
+            gap: 25px;
+            margin-bottom: 25px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #eee;
+        }}
+        .profile-avatar {{
+            width: 150px;
+            height: 150px;
+            border-radius: 50%;
+            object-fit: cover;
+            border: 5px solid #2a5298;
+        }}
+        .profile-info h2 {{
+            color: #2a5298;
+            margin-bottom: 5px;
+        }}
+        .profile-info p {{
+            color: #666;
+            margin-bottom: 15px;
+        }}
+        .bio-text {{
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 10px;
+            line-height: 1.6;
+        }}
+        .admin-label {{
+            background: #6f42c1;
+            color: white;
+            padding: 3px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+            margin-left: 10px;
+        }}
+        .banned-label {{
+            background: #dc3545;
+            color: white;
+            padding: 3px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+            margin-left: 10px;
+        }}
     </style>
 </head>
 <body>
@@ -395,11 +622,15 @@ BASE_HTML = '''<!DOCTYPE html>
     
     function insertEmoji(elementId, emoji) {{
         const input = document.getElementById(elementId);
-        input.value += emoji;
+        if (input) {{
+            input.value += emoji;
+        }}
     }}
     
     function previewMedia(input, containerId, maxFiles) {{
         const container = document.getElementById(containerId);
+        if (!container) return;
+        
         container.innerHTML = '';
         
         if (input.files.length > maxFiles) {{
@@ -444,6 +675,18 @@ BASE_HTML = '''<!DOCTYPE html>
             }}
             
             reader.readAsDataURL(file);
+        }}
+    }}
+    
+    function confirmReport(itemType, itemId) {{
+        if (confirm('Вы уверены, что хотите пожаловаться на этот контент?\\n\\nКонтент будет скрыт после 3 жалоб.')) {{
+            window.location.href = '/report/' + itemType + '/' + itemId;
+        }}
+    }}
+    
+    function confirmBlock(userId, userName) {{
+        if (confirm('Вы уверены, что хотите заблокировать пользователя ' + userName + '?\\n\\nВы больше не сможете видеть его посты и сообщения.')) {{
+            window.location.href = '/block_user/' + userId;
         }}
     }}
     </script>
@@ -677,6 +920,11 @@ def edit_profile():
             if file.filename:
                 saved_name = save_file(file, 'image')
                 if saved_name:
+                    # Удаляем старый аватар если это не дефолтный
+                    if user.avatar_filename != 'default_avatar.png':
+                        old_path = os.path.join(app.config['UPLOAD_FOLDER'], user.avatar_filename)
+                        if os.path.exists(old_path):
+                            os.remove(old_path)
                     user.avatar_filename = saved_name
                     flash('✅ Аватар обновлен', 'success')
         
@@ -768,7 +1016,6 @@ def create_post():
             video_files = request.files.getlist('videos')
             videos = save_media_files(video_files, 5, 'video')
         
-        import json
         new_post = Post(
             content=content,
             post_type=post_type,
@@ -846,7 +1093,6 @@ def feed():
     
     posts_html = ""
     for post in posts:
-        import json
         images = json.loads(post.images) if post.images else []
         videos = json.loads(post.videos) if post.videos else []
         
@@ -855,7 +1101,7 @@ def feed():
             media_html = '<div class="media-gallery">'
             for img in images:
                 media_html += f'''<div class="gallery-item">
-                    <img src="/static/uploads/{img}" onclick="this.style.transform = this.style.transform === 'scale(1.5)' ? 'scale(1)' : 'scale(1.5)'; this.style.zIndex = this.style.zIndex === '100' ? '1' : '100';" style="cursor: pointer; transition: transform 0.3s; position: relative;">
+                    <img src="/static/uploads/{img}" style="cursor: pointer; transition: transform 0.3s; position: relative;">
                 </div>'''
             for vid in videos:
                 media_html += f'''<div class="gallery-item">
@@ -890,7 +1136,7 @@ def feed():
             
             <div id="comment-form-{post.id}" style="display: none; margin-top: 15px;">
                 <form method="POST" action="/add_comment/{post.id}">
-                    <textarea name="content" id="comment-{post.id}" class="comment-input" placeholder="Добавить комментарий..."></textarea>
+                    <textarea name="content" id="comment-{post.id}" class="form-input" placeholder="Добавить комментарий..." style="min-height: 60px;"></textarea>
                     <button type="button" class="btn btn-small" onclick="toggleEmojiPicker('comment-{post.id}')" style="margin-top: 5px;">😊 Смайлик</button>
                     <button type="submit" class="btn btn-small" style="margin-top: 5px;">Отправить</button>
                     
@@ -909,6 +1155,7 @@ def feed():
         <div>
             <a href="/create_post" class="btn">📝 Создать пост</a>
             <a href="/edit_profile" class="btn btn-secondary" style="margin-left: 10px;">👤 Профиль</a>
+            <a href="/logout" class="btn btn-danger" style="margin-left: 10px;">🚪 Выйти</a>
         </div>
     </div>
     
@@ -989,13 +1236,111 @@ def messages(receiver_id):
             </div>
             
             <button type="submit" class="btn">📤 Отправить</button>
-            <a href="/messages" class="btn btn-secondary" style="margin-left: 10px;">← Назад</a>
+            <a href="/feed" class="btn btn-secondary" style="margin-left: 10px;">← Назад</a>
         </form>
     </div>'''
     
     return render_page('Сообщения', content)
 
-# ========== ОСНОВНЫЕ МАРШРУТЫ (без изменений) ==========
+@app.route('/messages')
+@login_required
+def messages_list():
+    """Список диалогов"""
+    users = User.query.filter(User.id != current_user.id).all()
+    
+    users_html = ""
+    for user in users:
+        users_html += f'''<div class="card" style="margin-bottom: 10px;">
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+                <div style="display: flex; align-items: center; gap: 15px;">
+                    <img src="/static/uploads/{user.avatar_filename}" style="width: 50px; height: 50px; border-radius: 50%; object-fit: cover;">
+                    <div>
+                        <div style="font-weight: 600;">{user.first_name} {user.last_name}</div>
+                        <small>@{user.username}</small>
+                    </div>
+                </div>
+                <a href="/messages/{user.id}" class="btn btn-small">💬 Написать</a>
+            </div>
+        </div>'''
+    
+    content = f'''<div class="card">
+        <h2 style="color: #2a5298; margin-bottom: 25px;">💬 Личные сообщения</h2>
+        
+        <div style="margin-bottom: 20px;">
+            <a href="/feed" class="btn btn-secondary">← Назад в ленту</a>
+        </div>
+        
+        <h3 style="color: #2a5298; margin-bottom: 15px;">Выберите пользователя для общения:</h3>
+        
+        {users_html if users_html else '<p style="text-align: center; color: #666; padding: 20px;">Нет других пользователей.</p>'}
+    </div>'''
+    
+    return render_page('Сообщения', content)
+
+# ========== КОММЕНТАРИИ И ЛАЙКИ ==========
+@app.route('/like_post/<int:post_id>')
+@login_required
+def like_post(post_id):
+    """Лайкнуть/анлайкнуть пост"""
+    post = Post.query.get_or_404(post_id)
+    
+    # Проверяем, не заблокирован ли автор поста
+    if is_user_blocked(current_user.id, post.user_id):
+        flash('🚫 Вы заблокировали этого пользователя', 'error')
+        return redirect('/feed')
+    
+    # Проверяем, не лайкнул ли уже
+    existing_like = Like.query.filter_by(post_id=post_id, user_id=current_user.id).first()
+    
+    if existing_like:
+        # Убираем лайк
+        db.session.delete(existing_like)
+        db.session.commit()
+        flash('💔 Лайк убран', 'success')
+    else:
+        # Ставим лайк
+        new_like = Like(post_id=post_id, user_id=current_user.id)
+        db.session.add(new_like)
+        db.session.commit()
+        flash('❤️ Пост понравился', 'success')
+    
+    return redirect('/feed')
+
+@app.route('/add_comment/<int:post_id>', methods=['POST'])
+@login_required
+def add_comment(post_id):
+    """Добавить комментарий к посту"""
+    post = Post.query.get_or_404(post_id)
+    
+    # Проверяем, не заблокирован ли автор поста
+    if is_user_blocked(current_user.id, post.user_id):
+        flash('🚫 Вы заблокировали этого пользователя', 'error')
+        return redirect('/feed')
+    
+    content = request.form['content']
+    
+    if not content.strip():
+        flash('❌ Комментарий не может быть пустым', 'error')
+        return redirect('/feed')
+    
+    is_clean, found_words = check_content_for_report(content)
+    
+    if not is_clean:
+        flash(f'⚠️ В вашем комментарии обнаружены слова, на которые могут пожаловаться: {", ".join(found_words)}', 'warning')
+    
+    new_comment = Comment(
+        content=content,
+        user_id=current_user.id,
+        post_id=post_id
+    )
+    
+    db.session.add(new_comment)
+    db.session.commit()
+    
+    flash('💬 Комментарий добавлен', 'success')
+    return redirect('/feed')
+
+# ========== ОСНОВНЫЕ МАРШРУТЫ ==========
 @app.route('/logout')
 @login_required
 def logout():
@@ -1034,10 +1379,73 @@ def profile(user_id):
     <div style="display: flex; gap: 10px; margin-top: 20px;">
         {f'<a href="/edit_profile" class="btn">✏️ Редактировать профиль</a>' if user_id == current_user.id else ''}
         {f'<a href="/messages/{user_id}" class="btn">💬 Написать сообщение</a>' if user_id != current_user.id else ''}
-        {f'<button onclick="confirmBlock({user_id}, \'{user.username}\')" class="btn btn-block">🚫 Заблокировать</button>' if user_id != current_user.id else ''}
+        {f'<button onclick="confirmBlock({user_id}, \'{user.username}\')" class="btn btn-block">🚫 Заблокировать</button>' if user_id != current_user.id and not is_user_blocked(current_user.id, user_id) else ''}
     </div>'''
     
     return render_page(f'Профиль {user.username}', content)
+
+# ========== ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ ==========
+@app.route('/report/<item_type>/<int:item_id>')
+@login_required
+def report_content(item_type, item_id):
+    """Пожаловаться на контент"""
+    if item_type == 'post':
+        item = Post.query.get(item_id)
+    elif item_type == 'message':
+        item = Message.query.get(item_id)
+    elif item_type == 'comment':
+        item = Comment.query.get(item_id)
+    else:
+        flash('Неверный тип контента', 'error')
+        return redirect('/feed')
+    
+    if not item:
+        flash('Контент не найден', 'error')
+        return redirect('/feed')
+    
+    reported_by = item.reported_by.split(',') if item.reported_by else []
+    
+    if str(current_user.id) in reported_by:
+        flash('Вы уже жаловались на этот контент', 'error')
+        return redirect('/feed')
+    
+    item.reports_count += 1
+    if item.reported_by:
+        item.reported_by += f',{current_user.id}'
+    else:
+        item.reported_by = str(current_user.id)
+    
+    if item.reports_count >= 3:
+        item.is_hidden = True
+    
+    db.session.commit()
+    
+    if item.reports_count >= 3:
+        flash(f'✅ Жалоба принята. Контент скрыт после {item.reports_count} жалоб.', 'success')
+    else:
+        flash(f'✅ Жалоба принята. Всего жалоб: {item.reports_count}/3', 'success')
+    
+    return redirect('/feed')
+
+@app.route('/block_user/<int:blocked_id>')
+@login_required
+def block_user(blocked_id):
+    """Блокировать пользователя"""
+    if current_user.id == blocked_id:
+        flash('❌ Нельзя заблокировать самого себя', 'error')
+        return redirect(f'/profile/{blocked_id}')
+    
+    if is_user_blocked(current_user.id, blocked_id):
+        flash('❌ Пользователь уже заблокирован', 'error')
+        return redirect(f'/profile/{blocked_id}')
+    
+    blocked_user = BlockedUser(blocker_id=current_user.id, blocked_id=blocked_id)
+    db.session.add(blocked_user)
+    db.session.commit()
+    
+    user = User.query.get(blocked_id)
+    flash(f'✅ Пользователь {user.first_name} {user.last_name} заблокирован', 'success')
+    return redirect(f'/profile/{blocked_id}')
 
 # ========== ЗАПУСК ПРИЛОЖЕНИЯ ==========
 if __name__ == '__main__':
@@ -1047,14 +1455,24 @@ if __name__ == '__main__':
         # Создаем дефолтный аватар если нужно
         default_avatar_path = os.path.join('static', 'uploads', 'default_avatar.png')
         if not os.path.exists(default_avatar_path):
-            # Создаем простой PNG аватар
-            from PIL import Image, ImageDraw
-            img = Image.new('RGB', (200, 200), color=(42, 82, 152))
-            d = ImageDraw.Draw(img)
-            d.ellipse([50, 50, 150, 150], fill=(255, 255, 255))
-            img.save(default_avatar_path)
+            try:
+                # Попробуем создать простой аватар с помощью PIL
+                try:
+                    from PIL import Image, ImageDraw
+                    img = Image.new('RGB', (200, 200), color=(42, 82, 152))
+                    d = ImageDraw.Draw(img)
+                    d.ellipse([50, 50, 150, 150], fill=(255, 255, 255))
+                    img.save(default_avatar_path)
+                except ImportError:
+                    # Если PIL нет, создаем простой текстовый файл
+                    with open(default_avatar_path, 'w') as f:
+                        f.write('Default Avatar')
+            except:
+                pass
         
         print("✅ База данных создана")
+        print("🌐 Сервер запущен: http://localhost:8321")
+        print("🔑 Администратор: зарегистрируйтесь с псевдонимом 'mateugram'")
     
     port = int(os.environ.get('PORT', 8321))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=True)
