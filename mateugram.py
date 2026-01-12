@@ -634,7 +634,7 @@ BASE_HTML = '''<!DOCTYPE html>
         container.innerHTML = '';
         
         if (input.files.length > maxFiles) {{
-            alert(`Максимальное количество файлов: ${maxFiles}`);
+            alert('Максимальное количество файлов: ' + maxFiles);
             input.value = '';
             return;
         }}
@@ -1236,7 +1236,7 @@ def messages(receiver_id):
             </div>
             
             <button type="submit" class="btn">📤 Отправить</button>
-            <a href="/feed" class="btn btn-secondary" style="margin-left: 10px;">← Назад</a>
+            <a href="/messages" class="btn btn-secondary" style="margin-left: 10px;">← Назад</a>
         </form>
     </div>'''
     
