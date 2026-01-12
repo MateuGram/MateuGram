@@ -1657,6 +1657,7 @@ def feed():
                 <button onclick="confirmReport('post', {post.id})" class="btn btn-small btn-report">🚫 Пожаловаться</button>
                 <a href="/profile/{post.author.id}" class="btn btn-small btn-secondary">👤 Профиль</a>
                 {f'<a href="/follow/{post.author.id}" class="btn btn-small btn-follow">➕ Подписаться</a>' if not is_following(current_user.id, post.author.id) and post.author.id != current_user.id else ''}
+                {f'<button onclick="confirmDelete(\'пост\', {post.id})" class="btn btn-small btn-danger">🗑 Удалить</button>' if post.user_id == current_user.id else ''}
             </div>
             
             <div id="comment-form-{post.id}" style="display: none; margin-top: 15px;">
@@ -1829,7 +1830,7 @@ def profile(user_id):
                 </div>'''
             media_html += '</div>'
         
-        posts_html += f'''<div class="post">
+                posts_html += f'''<div class="post">
             <div class="post-header">
                 <div class="post-time">{post.created_at.strftime('%d.%m.%Y %H:%M')}</div>
             </div>
@@ -1841,6 +1842,10 @@ def profile(user_id):
             <div class="post-stats">
                 <span>❤️ {get_like_count(post.id)}</span>
                 <span>💬 {get_comment_count(post.id)}</span>
+            </div>
+            
+            <div class="post-actions">
+                {f'<button onclick="confirmDelete(\'пост\', {post.id})" class="btn btn-small btn-danger">🗑 Удалить</button>' if user_id == current_user.id else ''}
             </div>
         </div>'''
     
@@ -1947,6 +1952,7 @@ def messages(receiver_id):
                 <span>{msg.created_at.strftime('%H:%M')}</span>
             </div>
             <div class="message-content">{get_emoji_html(msg.content)}</div>
+            {f'<div style="margin-top: 5px;"><button onclick="confirmDelete(\'сообщение\', {msg.id})" class="btn btn-small btn-danger">🗑 Удалить</button></div>' if msg.sender_id == current_user.id else ''}
         </div>'''
     
     content = f'''<div class="nav-menu">
@@ -2695,3 +2701,4 @@ if __name__ == '__main__':
     
     port = int(os.environ.get('PORT', 8321))
     app.run(host='0.0.0.0', port=port, debug=True)
+
