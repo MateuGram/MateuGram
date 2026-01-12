@@ -1830,7 +1830,7 @@ def profile(user_id):
                 </div>'''
             media_html += '</div>'
         
-                posts_html += f'''<div class="post">
+        posts_html += f'''<div class="post">
             <div class="post-header">
                 <div class="post-time">{post.created_at.strftime('%d.%m.%Y %H:%M')}</div>
             </div>
@@ -2701,4 +2701,3 @@ if __name__ == '__main__':
     
     port = int(os.environ.get('PORT', 8321))
     app.run(host='0.0.0.0', port=port, debug=True)
-
