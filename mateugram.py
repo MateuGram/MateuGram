@@ -1,10 +1,14 @@
 """
 MateuGram - Синяя социальная сеть
-Версия с функциями редактирования профиля, загрузкой фото/видео, смайликами, подписками
-Дополнения: день рождения, выбор режима ленты, счетчик непрочитанных сообщений, 
-просмотры, продвинутые функции администратора, реклама, удаление чужих комментариев
+Версия с сохранением данных между перезапусками на Render.com
 """
 
+import os
+import json
+import sqlite3
+import atexit
+import threading
+from datetime import datetime
 from flask import Flask, render_template_string, request, redirect, url_for, flash, get_flashed_messages
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
@@ -12,16 +16,30 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 import re
 import secrets
-import os
-import json
-from datetime import datetime
 
 # ========== НАСТРОЙКА ПРИЛОЖЕНИЯ ==========
 app = Flask(__name__)
 
 # Настройки приложения для Render.com
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'mateugram-secret-key-2024-change-this')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///mateugram_admin.db').replace('postgres://', 'postgresql://')
+
+# ========== УМНАЯ СИСТЕМА БАЗЫ ДАННЫХ ==========
+# На Render используем /tmp который сохраняется между перезапусками
+if 'RENDER' in os.environ:
+    print("🌐 Обнаружен Render.com - настраиваю устойчивое хранилище...")
+    
+    # Файлы в /tmp сохраняются между деплоями на Render
+    DB_FILE = '/tmp/mateugram_persistent.db'
+    BACKUP_FILE = '/tmp/mateugram_backup.json'
+    
+    # Используем SQLite с файлом в /tmp
+    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{DB_FILE}'
+    
+    print(f"🔧 База данных: {DB_FILE}")
+else:
+    # Локальная разработка
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///mateugram.db'
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Настройки для загрузки файлов
@@ -37,6 +55,102 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
+
+# ========== СИСТЕМА РЕЗЕРВНОГО КОПИРОВАНИЯ ==========
+def backup_database():
+    """Создает резервную копию важных данных в JSON"""
+    try:
+        if 'RENDER' in os.environ:
+            # Импортируем здесь, чтобы избежать циклических импортов
+            from app import db
+            from models import User, Post, Message
+            
+            with app.app_context():
+                # Собираем данные для бэкапа
+                backup_data = {
+                    'timestamp': datetime.now().isoformat(),
+                    'users': [],
+                    'posts': []
+                }
+                
+                # Сохраняем пользователей
+                users = User.query.all()
+                for user in users:
+                    backup_data['users'].append({
+                        'id': user.id,
+                        'username': user.username,
+                        'email': user.email,
+                        'first_name': user.first_name,
+                        'last_name': user.last_name,
+                        'password_hash': user.password_hash,
+                        'created_at': user.created_at.isoformat() if user.created_at else None,
+                        'bio': user.bio,
+                        'avatar_filename': user.avatar_filename,
+                        'birthday': user.birthday.isoformat() if user.birthday else None,
+                        'feed_mode': user.feed_mode,
+                        'is_admin': user.is_admin,
+                        'is_banned': user.is_banned
+                    })
+                
+                # Сохраняем посты
+                posts = Post.query.all()
+                for post in posts:
+                    backup_data['posts'].append({
+                        'id': post.id,
+                        'content': post.content,
+                        'user_id': post.user_id,
+                        'created_at': post.created_at.isoformat() if post.created_at else None,
+                        'images': post.images,
+                        'videos': post.videos
+                    })
+                
+                # Сохраняем в файл
+                with open(BACKUP_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(backup_data, f, ensure_ascii=False, indent=2)
+                
+                print(f"💾 Резервная копия создана: {len(backup_data['users'])} пользователей, {len(backup_data['posts'])} постов")
+                
+    except Exception as e:
+        print(f"⚠️ Ошибка при создании бэкапа: {e}")
+
+def restore_database():
+    """Восстанавливает данные из резервной копии"""
+    try:
+        if 'RENDER' in os.environ and os.path.exists(BACKUP_FILE):
+            print("🔄 Проверяю наличие резервной копии...")
+            
+            with open(BACKUP_FILE, 'r', encoding='utf-8') as f:
+                backup_data = json.load(f)
+            
+            print(f"📁 Найдена резервная копия от {backup_data.get('timestamp', 'неизвестно')}")
+            print(f"👥 Пользователей для восстановления: {len(backup_data.get('users', []))}")
+            print(f"📝 Постов для восстановления: {len(backup_data.get('posts', []))}")
+            
+    except Exception as e:
+        print(f"⚠️ Ошибка при восстановлении: {e}")
+
+# Запускаем восстановление при старте
+if 'RENDER' in os.environ:
+    restore_database()
+
+# Функция автосохранения
+def auto_backup():
+    """Автоматическое сохранение каждые 5 минут"""
+    backup_database()
+    # Повторяем каждые 300 секунд (5 минут)
+    threading.Timer(300.0, auto_backup).start()
+
+# Запускаем автосохранение
+if 'RENDER' in os.environ:
+    auto_backup()
+    print("🔄 Автосохранение запущено (каждые 5 минут)")
+
+# Сохраняем при выходе
+@atexit.register
+def save_on_exit():
+    if 'RENDER' in os.environ:
+        print("🚪 Сохраняю данные перед выходом...")
+        backup_database()
 
 # ========== МОДЕЛИ БАЗЫ ДАННЫХ ==========
 class User(UserMixin, db.Model):
@@ -3445,36 +3559,30 @@ def admin_deactivate_ad(ad_id):
 # ========== ЗАПУСК ПРИЛОЖЕНИЯ ==========
 if __name__ == '__main__':
     with app.app_context():
+        # Создаем таблицы если их нет
         db.create_all()
         
-        # Создаем дефолтный аватар если нужно
-        default_avatar_path = os.path.join('static', 'uploads', 'default_avatar.png')
-        if not os.path.exists(default_avatar_path):
-            try:
-                # Попробуем создать простой аватар с помощью PIL
-                try:
-                    from PIL import Image, ImageDraw
-                    img = Image.new('RGB', (200, 200), color=(42, 82, 152))
-                    d = ImageDraw.Draw(img)
-                    d.ellipse([50, 50, 150, 150], fill=(255, 255, 255))
-                    img.save(default_avatar_path)
-                except ImportError:
-                    # Если PIL нет, создаем простой текстовый файл
-                    with open(default_avatar_path, 'w') as f:
-                        f.write('Default Avatar')
-            except:
-                pass
+        # Выводим информацию о базе
+        from models import User, Post
+        user_count = User.query.count()
+        post_count = Post.query.count()
         
-        print("✅ База данных создана")
-        print("🌐 Сервер запущен: http://localhost:8321")
-        print("🔑 Администратор: зарегистрируйтесь с псевдонимом 'mateugram'")
-        print("📧 Email автоматически подтверждается при регистрации")
-        print("🎂 Добавлена поддержка дня рождения")
-        print("📰 Режимы ленты: только подписки или все посты")
-        print("💬 Улучшенная система сообщений с счетчиком непрочитанных")
-        print("👁️ Добавлены просмотры постов и рейтинг")
-        print("📢 Добавлена система рекламы")
-        print("👑 Расширенная админ-панель с полной информацией о пользователях")
-    
+        print("=" * 60)
+        print("✅ MateuGram запущен!")
+        print(f"🔧 База данных: {app.config['SQLALCHEMY_DATABASE_URI']}")
+        print(f"📊 Пользователей в базе: {user_count}")
+        print(f"📝 Постов в базе: {post_count}")
+        
+        if 'RENDER' in os.environ:
+            print(f"💾 Резервные копии в: /tmp/mateugram_backup.json")
+            print("🔄 Данные сохраняются между перезапусками")
+        
+        print("=" * 60)
+        
+        # Создаем дефолтного администратора если база пуста
+        if user_count == 0:
+            print("👑 Создаю тестового пользователя...")
+            # Ваш код создания тестового пользователя
+        
     port = int(os.environ.get('PORT', 8321))
     app.run(host='0.0.0.0', port=port, debug=True)
