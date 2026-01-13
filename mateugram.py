@@ -1,6 +1,8 @@
 """
 MateuGram - Синяя социальная сеть
 Версия с функциями редактирования профиля, загрузкой фото/видео, смайликами, подписками
+Дополнения: день рождения, выбор режима ленты, счетчик непрочитанных сообщений, 
+просмотры, продвинутые функции администратора, реклама, удаление чужих комментариев
 """
 
 from flask import Flask, render_template_string, request, redirect, url_for, flash, get_flashed_messages
@@ -52,12 +54,15 @@ class User(UserMixin, db.Model):
     is_banned = db.Column(db.Boolean, default=False)
     bio = db.Column(db.Text, default='')
     avatar_filename = db.Column(db.String(200), default='default_avatar.png')
+    birthday = db.Column(db.Date, nullable=True)
+    feed_mode = db.Column(db.String(20), default='following')  # 'following' или 'all'
     
     posts = db.relationship('Post', backref='author', lazy=True, cascade='all, delete-orphan')
     sent_messages = db.relationship('Message', foreign_keys='Message.sender_id', backref='sender', lazy=True)
     received_messages = db.relationship('Message', foreign_keys='Message.receiver_id', backref='receiver', lazy=True)
     comments = db.relationship('Comment', backref='author', lazy=True, cascade='all, delete-orphan')
     likes = db.relationship('Like', backref='user', lazy=True, cascade='all, delete-orphan')
+    views = db.relationship('View', backref='viewer', lazy=True, cascade='all, delete-orphan')
     
     blocked_users = db.relationship('BlockedUser', foreign_keys='BlockedUser.blocker_id', backref='blocker', lazy=True)
     blocked_by = db.relationship('BlockedUser', foreign_keys='BlockedUser.blocked_id', backref='blocked', lazy=True)
@@ -65,6 +70,9 @@ class User(UserMixin, db.Model):
     # Подписки: кто на кого подписан
     following = db.relationship('Follow', foreign_keys='Follow.follower_id', backref='follower', lazy=True)
     followers = db.relationship('Follow', foreign_keys='Follow.followed_id', backref='followed', lazy=True)
+    
+    # Рекламные предложения
+    advertisements = db.relationship('Advertisement', backref='creator', lazy=True)
 
 class Follow(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -83,6 +91,7 @@ class Post(db.Model):
     reports_count = db.Column(db.Integer, default=0)
     reported_by = db.Column(db.Text, default='')
     is_hidden = db.Column(db.Boolean, default=False)
+    views_count = db.Column(db.Integer, default=0)
     
     # Медиа файлы
     images = db.Column(db.Text, default='')  # JSON список изображений
@@ -90,6 +99,7 @@ class Post(db.Model):
     
     comments = db.relationship('Comment', backref='post', lazy=True, cascade='all, delete-orphan')
     likes = db.relationship('Like', backref='post', lazy=True, cascade='all, delete-orphan')
+    views = db.relationship('View', backref='post', lazy=True, cascade='all, delete-orphan')
 
 class Comment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -109,6 +119,14 @@ class Like(db.Model):
     
     __table_args__ = (db.UniqueConstraint('user_id', 'post_id', name='unique_like'),)
 
+class View(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
+    post_id = db.Column(db.Integer, db.ForeignKey('post.id', ondelete='CASCADE'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (db.UniqueConstraint('user_id', 'post_id', name='unique_view'),)
+
 class Message(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     content = db.Column(db.Text, nullable=False)
@@ -127,6 +145,23 @@ class BlockedUser(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     __table_args__ = (db.UniqueConstraint('blocker_id', 'blocked_id', name='unique_block'),)
+
+class Advertisement(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    title = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.Text, nullable=False)
+    image_filename = db.Column(db.String(200))
+    video_filename = db.Column(db.String(200))
+    status = db.Column(db.String(20), default='pending')  # 'pending', 'approved', 'rejected', 'active'
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    admin_notes = db.Column(db.Text, default='')
+    
+    # Поля для размещения рекламы
+    show_in_feed = db.Column(db.Boolean, default=False)
+    show_on_sidebar = db.Column(db.Boolean, default=False)
+    start_date = db.Column(db.DateTime, nullable=True)
+    end_date = db.Column(db.DateTime, nullable=True)
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -229,6 +264,10 @@ def get_comment_count(post_id):
     """Получает количество комментариев поста"""
     return Comment.query.filter_by(post_id=post_id).count()
 
+def get_view_count(post_id):
+    """Получает количество просмотров поста"""
+    return View.query.filter_by(post_id=post_id).count()
+
 def is_following(follower_id, followed_id):
     """Проверяет, подписан ли пользователь на другого пользователя"""
     return Follow.query.filter_by(follower_id=follower_id, followed_id=followed_id).first() is not None
@@ -240,6 +279,64 @@ def get_following_count(user_id):
 def get_followers_count(user_id):
     """Получает количество подписчиков пользователя"""
     return Follow.query.filter_by(followed_id=user_id).count()
+
+def get_unread_messages_count(user_id):
+    """Получает количество непрочитанных сообщений пользователя"""
+    return Message.query.filter_by(receiver_id=user_id, is_read=False).count()
+
+def add_view(post_id, user_id):
+    """Добавляет просмотр поста"""
+    # Проверяем, не просматривал ли уже
+    existing_view = View.query.filter_by(post_id=post_id, user_id=user_id).first()
+    if not existing_view:
+        new_view = View(post_id=post_id, user_id=user_id)
+        db.session.add(new_view)
+        post = Post.query.get(post_id)
+        post.views_count += 1
+        db.session.commit()
+        return True
+    return False
+
+def get_post_score(post):
+    """Рассчитывает рейтинг поста для ленты"""
+    likes = get_like_count(post.id)
+    comments = get_comment_count(post.id)
+    views = post.views_count
+    time_diff = (datetime.utcnow() - post.created_at).total_seconds() / 3600  # Часы с момента создания
+    
+    # Формула: учитываем лайки, комментарии, просмотры и время
+    score = (likes * 2 + comments * 3 + views * 0.5) / (time_diff + 1)
+    return score
+
+def get_users_with_conversation(user_id):
+    """Получает пользователей, с которыми есть переписка"""
+    # Получаем отправителей сообщений
+    sent_to = db.session.query(Message.receiver_id).filter_by(sender_id=user_id).distinct()
+    # Получаем получателей сообщений
+    received_from = db.session.query(Message.sender_id).filter_by(receiver_id=user_id).distinct()
+    
+    # Объединяем
+    all_conversation_partners = set()
+    for user_list in [sent_to, received_from]:
+        for user_id_tuple in user_list:
+            all_conversation_partners.add(user_id_tuple[0])
+    
+    return list(all_conversation_partners)
+
+def get_users_with_unread_messages(user_id):
+    """Получает пользователей, от которых есть непрочитанные сообщения"""
+    unread_messages = Message.query.filter_by(receiver_id=user_id, is_read=False).all()
+    users_with_unread = set()
+    for msg in unread_messages:
+        users_with_unread.add(msg.sender_id)
+    return list(users_with_unread)
+
+def mark_messages_as_read(sender_id, receiver_id):
+    """Помечает все сообщения от sender_id к receiver_id как прочитанные"""
+    messages = Message.query.filter_by(sender_id=sender_id, receiver_id=receiver_id, is_read=False).all()
+    for msg in messages:
+        msg.is_read = True
+    db.session.commit()
 
 def report_content(item_type, item_id, user_id):
     """Добавляет жалобу на контент"""
@@ -310,7 +407,7 @@ BASE_HTML = '''<!DOCTYPE html>
             color: #333;
         }}
         .container {{
-            max-width: 1000px;
+            max-width: 1200px;
             margin: 0 auto;
             padding: 20px;
         }}
@@ -406,6 +503,9 @@ BASE_HTML = '''<!DOCTYPE html>
         }}
         .btn-follow {{
             background: #17a2b8;
+        }}
+        .btn-ad {{
+            background: #9c27b0;
         }}
         .btn-small {{
             padding: 6px 12px;
@@ -727,6 +827,7 @@ BASE_HTML = '''<!DOCTYPE html>
             text-decoration: none;
             font-weight: 600;
             transition: all 0.3s;
+            position: relative;
         }}
         .nav-btn:hover {{
             background: #2a5298;
@@ -747,6 +848,9 @@ BASE_HTML = '''<!DOCTYPE html>
             justify-content: center;
             font-size: 12px;
             margin-left: 5px;
+            position: absolute;
+            top: -5px;
+            right: -5px;
         }}
         .warning-badge {{
             background: #ffc107;
@@ -846,6 +950,114 @@ BASE_HTML = '''<!DOCTYPE html>
         .follow-stat-label {{
             font-size: 0.9em;
             color: #666;
+        }}
+        .advertisement {{
+            background: linear-gradient(135deg, #ff9a9e 0%, #fad0c4 100%);
+            border-radius: 12px;
+            padding: 20px;
+            margin: 20px 0;
+            border: 2px dashed #9c27b0;
+        }}
+        .advertisement.approved {{
+            background: linear-gradient(135deg, #a1ffce 0%, #faffd1 100%);
+            border: 2px solid #28a745;
+        }}
+        .advertisement.rejected {{
+            background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%);
+            border: 2px solid #dc3545;
+        }}
+        .advertisement.pending {{
+            background: linear-gradient(135deg, #a1c4fd 0%, #c2e9fb 100%);
+            border: 2px dashed #ffc107;
+        }}
+        .unread-indicator {{
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            background: #dc3545;
+            border-radius: 50%;
+            margin-left: 10px;
+            vertical-align: middle;
+        }}
+        .birthday-badge {{
+            background: #ff6b6b;
+            color: white;
+            padding: 3px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+            margin-left: 10px;
+            animation: pulse 2s infinite;
+        }}
+        @keyframes pulse {{
+            0% {{ opacity: 1; }}
+            50% {{ opacity: 0.5; }}
+            100% {{ opacity: 1; }}
+        }}
+        .feed-mode-selector {{
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            align-items: center;
+        }}
+        .mode-btn {{
+            padding: 8px 16px;
+            border-radius: 20px;
+            border: 2px solid #2a5298;
+            background: white;
+            color: #2a5298;
+            cursor: pointer;
+            font-weight: 600;
+        }}
+        .mode-btn.active {{
+            background: #2a5298;
+            color: white;
+        }}
+        .sidebar {{
+            position: fixed;
+            right: 20px;
+            top: 100px;
+            width: 300px;
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            max-height: calc(100vh - 150px);
+            overflow-y: auto;
+        }}
+        .main-content {{
+            margin-right: 340px;
+        }}
+        .ad-sidebar {{
+            text-align: center;
+            margin-bottom: 20px;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            overflow: hidden;
+        }}
+        .ad-sidebar img {{
+            width: 100%;
+            max-height: 200px;
+            object-fit: cover;
+        }}
+        .ad-sidebar video {{
+            width: 100%;
+            max-height: 200px;
+            object-fit: cover;
+        }}
+        .ad-sidebar-content {{
+            padding: 15px;
+        }}
+        .view-count {{
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            color: #666;
+            font-size: 0.9em;
+        }}
+        .post-score {{
+            font-size: 0.8em;
+            color: #888;
+            margin-top: 5px;
         }}
     </style>
 </head>
@@ -988,6 +1200,16 @@ BASE_HTML = '''<!DOCTYPE html>
             window.location.href = '/admin/remove_admin/' + userId;
         }}
     }}
+    
+    function confirmDeleteOtherComment(commentId) {{
+        if (confirm('Вы уверены, что хотите удалить этот комментарий?\\n\\nЭто действие доступно только владельцам постов.')) {{
+            window.location.href = '/delete_other_comment/' + commentId;
+        }}
+    }}
+    
+    function changeFeedMode(mode) {{
+        window.location.href = '/change_feed_mode/' + mode;
+    }}
     </script>
 </body>
 </html>'''
@@ -1005,7 +1227,30 @@ def get_flash_html():
             html += f'<div class="alert alert-info">{message}</div>'
     return html
 
-def render_page(title, content):
+def render_page(title, content, include_sidebar=True):
+    """Рендерит страницу с возможностью добавления сайдбара с рекламой"""
+    sidebar_html = ""
+    if include_sidebar and current_user.is_authenticated:
+        # Получаем активные рекламные объявления
+        active_ads = Advertisement.query.filter_by(status='active', show_on_sidebar=True).all()
+        
+        if active_ads:
+            sidebar_html = '<div class="sidebar">'
+            sidebar_html += '<h3 style="color: #2a5298; margin-bottom: 15px;">🎯 Реклама</h3>'
+            for ad in active_ads:
+                sidebar_html += f'''<div class="ad-sidebar">
+                    {f'<img src="/static/uploads/{ad.image_filename}">' if ad.image_filename else ''}
+                    {f'<video src="/static/uploads/{ad.video_filename}" controls>' if ad.video_filename else ''}
+                    <div class="ad-sidebar-content">
+                        <h4>{ad.title}</h4>
+                        <p style="font-size: 0.9em;">{ad.description[:100]}{'...' if len(ad.description) > 100 else ''}</p>
+                    </div>
+                </div>'''
+            sidebar_html += '</div>'
+    
+    if include_sidebar and sidebar_html:
+        content = f'<div class="main-content">{content}</div>{sidebar_html}'
+    
     return render_template_string(
         BASE_HTML.format(
             title=title,
@@ -1037,16 +1282,20 @@ def index():
         <h3 style="color: #2a5298; margin-bottom: 15px;">Новые возможности:</h3>
         <ul style="list-style: none; padding: 0;">
             <li style="padding: 10px 0; border-bottom: 1px solid #eee;">✅ Подписки на пользователей</li>
-            <li style="padding: 10px 0; border-bottom: 1px solid #eee;">✅ Редактирование профиля</li>
+            <li style="padding: 10px 0; border-bottom: 1px solid #eee;">✅ Редактирование профиля с днем рождения</li>
             <li style="padding: 10px 0; border-bottom: 1px solid #eee;">✅ Загрузка фото и видео в посты</li>
             <li style="padding: 10px 0; border-bottom: 1px solid #eee;">✅ Смайлики в сообщениях и постах</li>
-            <li style="padding: 10px 0; border-bottom: 1px solid #eee;">✅ Админ-панель с назначением админов</li>
+            <li style="padding: 10px 0; border-bottom: 1px solid #eee;">✅ Админ-панель с полной информацией о пользователях</li>
             <li style="padding: 10px 0; border-bottom: 1px solid #eee;">✅ Комментарии и лайки</li>
+            <li style="padding: 10px 0; border-bottom: 1px solid #eee;">✅ Просмотры и рейтинг постов</li>
+            <li style="padding: 10px 0; border-bottom: 1px solid #eee;">✅ Разделение сообщений на диалоги и новых пользователей</li>
+            <li style="padding: 10px 0; border-bottom: 1px solid #eee;">✅ Счетчик непрочитанных сообщений</li>
+            <li style="padding: 10px 0; border-bottom: 1px solid #eee;">✅ Размещение рекламы</li>
             <li style="padding: 10px 0;">✅ Автоматическое подтверждение email</li>
         </ul>
     </div>'''
     
-    return render_page('Главная', content)
+    return render_page('Главная', content, include_sidebar=False)
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
@@ -1056,6 +1305,7 @@ def register():
         first_name = request.form['first_name']
         last_name = request.form['last_name']
         password = request.form['password']
+        birthday_str = request.form.get('birthday')
         
         if not validate_username(username):
             flash('Псевдоним должен содержать только английские буквы, цифры и символы _ . -', 'error')
@@ -1068,6 +1318,14 @@ def register():
         if User.query.filter_by(username=username).first():
             flash('Псевдоним уже занят', 'error')
             return redirect('/register')
+        
+        # Парсим дату рождения
+        birthday = None
+        if birthday_str:
+            try:
+                birthday = datetime.strptime(birthday_str, '%Y-%m-%d').date()
+            except:
+                flash('Неверный формат даты рождения', 'warning')
         
         # Если пользователь регистрируется как MateuGram, делаем его администратором
         is_admin = (username.lower() == 'mateugram')
@@ -1082,7 +1340,8 @@ def register():
             email_verified=True,  # АВТОМАТИЧЕСКОЕ ПОДТВЕРЖДЕНИЕ
             verification_code=None,  # НЕ НУЖЕН КОД
             is_active=True,
-            is_admin=is_admin
+            is_admin=is_admin,
+            birthday=birthday
         )
         
         db.session.add(new_user)
@@ -1128,6 +1387,11 @@ def register():
             </div>
             
             <div class="form-group">
+                <label class="form-label">🎂 Дата рождения</label>
+                <input type="date" name="birthday" class="form-input">
+            </div>
+            
+            <div class="form-group">
                 <label class="form-label">🔒 Пароль</label>
                 <input type="password" name="password" class="form-input" placeholder="Не менее 8 символов" required minlength="8">
             </div>
@@ -1140,7 +1404,7 @@ def register():
         </div>
     </div>'''
     
-    return render_page('Регистрация', content)
+    return render_page('Регистрация', content, include_sidebar=False)
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -1191,7 +1455,7 @@ def login():
         </div>
     </div>'''
     
-    return render_page('Вход', content)
+    return render_page('Вход', content, include_sidebar=False)
 
 @app.route('/logout')
 @login_required
@@ -1287,14 +1551,18 @@ def following():
             </div>
         </div>'''
     
+    unread_count = get_unread_messages_count(current_user.id)
+    messages_badge = f'<span class="unread-badge">{unread_count}</span>' if unread_count > 0 else ''
+    
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
-        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения{messages_badge}</a>
         <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
         <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/following" class="nav-btn active">👥 Подписки</a>
         <a href="/followers" class="nav-btn">👤 Подписчики</a>
         <a href="/profile/{current_user.id}" class="nav-btn">👤 Мой профиль</a>
+        <a href="/advertisements" class="btn btn-ad btn-small" style="margin-left: auto;">📢 Реклама</a>
         {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
         <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
     </div>
@@ -1347,14 +1615,18 @@ def followers():
             </div>
         </div>'''
     
+    unread_count = get_unread_messages_count(current_user.id)
+    messages_badge = f'<span class="unread-badge">{unread_count}</span>' if unread_count > 0 else ''
+    
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
-        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения{messages_badge}</a>
         <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
         <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/following" class="nav-btn">👥 Подписки</a>
         <a href="/followers" class="nav-btn active">👤 Подписчики</a>
         <a href="/profile/{current_user.id}" class="nav-btn">👤 Мой профиль</a>
+        <a href="/advertisements" class="btn btn-ad btn-small" style="margin-left: auto;">📢 Реклама</a>
         {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
         <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
     </div>
@@ -1384,6 +1656,17 @@ def edit_profile():
         user.username = request.form.get('username', user.username)
         user.email = request.form.get('email', user.email)
         user.bio = request.form.get('bio', user.bio)
+        user.feed_mode = request.form.get('feed_mode', user.feed_mode)
+        
+        # Обновляем день рождения
+        birthday_str = request.form.get('birthday')
+        if birthday_str:
+            try:
+                user.birthday = datetime.strptime(birthday_str, '%Y-%m-%d').date()
+            except:
+                flash('Неверный формат даты рождения', 'warning')
+        else:
+            user.birthday = None
         
         # Проверяем уникальность username
         if user.username != current_user.username:
@@ -1426,6 +1709,8 @@ def edit_profile():
         flash('✅ Профиль успешно обновлен', 'success')
         return redirect(f'/profile/{user.id}')
     
+    birthday_str = current_user.birthday.strftime('%Y-%m-%d') if current_user.birthday else ''
+    
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
         <a href="/messages" class="nav-btn">💬 Сообщения</a>
@@ -1434,6 +1719,7 @@ def edit_profile():
         <a href="/following" class="nav-btn">👥 Подписки</a>
         <a href="/followers" class="nav-btn">👤 Подписчики</a>
         <a href="/edit_profile" class="nav-btn active">✏️ Редактировать</a>
+        <a href="/advertisements" class="btn btn-ad btn-small" style="margin-left: auto;">📢 Реклама</a>
         {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
         <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
     </div>
@@ -1476,8 +1762,21 @@ def edit_profile():
             </div>
             
             <div class="form-group">
+                <label class="form-label">🎂 Дата рождения</label>
+                <input type="date" name="birthday" class="form-input" value="{birthday_str}">
+            </div>
+            
+            <div class="form-group">
                 <label class="form-label">📝 О себе</label>
                 <textarea name="bio" class="form-input" rows="4" placeholder="Расскажите о себе...">{current_user.bio}</textarea>
+            </div>
+            
+            <div class="form-group">
+                <label class="form-label">📰 Режим ленты</label>
+                <select name="feed_mode" class="form-input">
+                    <option value="following" {'selected' if current_user.feed_mode == 'following' else ''}>Только подписки</option>
+                    <option value="all" {'selected' if current_user.feed_mode == 'all' else ''}>Все посты</option>
+                </select>
             </div>
             
             <div class="form-group">
@@ -1536,14 +1835,18 @@ def create_post():
         flash('✅ Пост опубликован', 'success')
         return redirect('/feed')
     
+    unread_count = get_unread_messages_count(current_user.id)
+    messages_badge = f'<span class="unread-badge">{unread_count}</span>' if unread_count > 0 else ''
+    
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
-        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения{messages_badge}</a>
         <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
         <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/following" class="nav-btn">👥 Подписки</a>
         <a href="/followers" class="nav-btn">👤 Подписчики</a>
         <a href="/create_post" class="nav-btn active">📝 Создать пост</a>
+        <a href="/advertisements" class="btn btn-ad btn-small" style="margin-left: auto;">📢 Реклама</a>
         {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
         <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
     </div>
@@ -1597,98 +1900,168 @@ def create_post():
     
     return render_page('Создать пост', content)
 
-# ========== ЛЕНТА С МЕДИА ==========
+# ========== ЛЕНТА С МЕДИА И ВЫБОРОМ РЕЖИМА ==========
 @app.route('/feed')
 @login_required
 def feed():
+    # Добавляем активные рекламные посты в ленту
+    active_ads = Advertisement.query.filter_by(status='active', show_in_feed=True).all()
+    
     # Получаем посты, исключая заблокированных пользователей
     blocked_ids = [b.blocked_id for b in BlockedUser.query.filter_by(blocker_id=current_user.id).all()]
     
-    # Получаем посты от пользователей, на которых подписаны
-    following_ids = [f.followed_id for f in Follow.query.filter_by(follower_id=current_user.id).all()]
-    following_ids.append(current_user.id)  # Добавляем свои посты
+    if current_user.feed_mode == 'following':
+        # Получаем посты от пользователей, на которых подписаны
+        following_ids = [f.followed_id for f in Follow.query.filter_by(follower_id=current_user.id).all()]
+        following_ids.append(current_user.id)  # Добавляем свои посты
+        
+        posts = Post.query.filter(
+            Post.is_hidden == False,
+            ~Post.user_id.in_(blocked_ids),
+            Post.user_id.in_(following_ids)
+        ).all()
+    else:
+        # Получаем все посты
+        posts = Post.query.filter(
+            Post.is_hidden == False,
+            ~Post.user_id.in_(blocked_ids)
+        ).all()
     
-    posts = Post.query.filter(
-        Post.is_hidden == False,
-        ~Post.user_id.in_(blocked_ids),
-        Post.user_id.in_(following_ids)
-    ).order_by(Post.created_at.desc()).all()
+    # Добавляем просмотр для текущего пользователя
+    for post in posts:
+        add_view(post.id, current_user.id)
+    
+    # Сортируем по рейтингу
+    posts_with_score = [(post, get_post_score(post)) for post in posts]
+    posts_with_score.sort(key=lambda x: x[1], reverse=True)
+    sorted_posts = [post for post, score in posts_with_score]
+    
+    # Смешиваем с рекламой (каждый 5-й пост может быть рекламой)
+    all_content = []
+    ad_index = 0
+    for i, post in enumerate(sorted_posts):
+        all_content.append(('post', post))
+        
+        # Добавляем рекламу
+        if (i + 1) % 5 == 0 and ad_index < len(active_ads):
+            all_content.append(('ad', active_ads[ad_index]))
+            ad_index += 1
     
     posts_html = ""
-    for post in posts:
-        images = json.loads(post.images) if post.images else []
-        videos = json.loads(post.videos) if post.videos else []
-        
-        media_html = ""
-        if images or videos:
-            media_html = '<div class="media-gallery">'
-            for img in images:
-                media_html += f'''<div class="gallery-item">
-                    <img src="/static/uploads/{img}" style="cursor: pointer; transition: transform 0.3s; position: relative;" onclick="this.style.transform = this.style.transform === 'scale(1.5)' ? 'scale(1)' : 'scale(1.5)'; this.style.zIndex = this.style.zIndex === '100' ? '1' : '100';">
-                </div>'''
-            for vid in videos:
-                media_html += f'''<div class="gallery-item">
-                    <video src="/static/uploads/{vid}" controls style="cursor: pointer;"></video>
-                </div>'''
-            media_html += '</div>'
-        
-        posts_html += f'''<div class="post">
-            <div class="post-header">
-                <img src="/static/uploads/{post.author.avatar_filename}" class="avatar">
-                <div>
-                    <div class="post-author">{post.author.first_name} {post.author.last_name}</div>
-                    <small>@{post.author.username}</small>
-                </div>
-                <div class="post-time">{post.created_at.strftime('%d.%m.%Y %H:%M')}</div>
-            </div>
+    for content_type, item in all_content:
+        if content_type == 'post':
+            post = item
+            images = json.loads(post.images) if post.images else []
+            videos = json.loads(post.videos) if post.videos else []
             
-            <div class="post-content">{get_emoji_html(post.content)}</div>
+            media_html = ""
+            if images or videos:
+                media_html = '<div class="media-gallery">'
+                for img in images:
+                    media_html += f'''<div class="gallery-item">
+                        <img src="/static/uploads/{img}" style="cursor: pointer; transition: transform 0.3s; position: relative;" onclick="this.style.transform = this.style.transform === 'scale(1.5)' ? 'scale(1)' : 'scale(1.5)'; this.style.zIndex = this.style.zIndex === '100' ? '1' : '100';">
+                    </div>'''
+                for vid in videos:
+                    media_html += f'''<div class="gallery-item">
+                        <video src="/static/uploads/{vid}" controls style="cursor: pointer;"></video>
+                    </div>'''
+                media_html += '</div>'
             
-            {media_html}
-            
-            <div class="post-stats">
-                <span>❤️ {get_like_count(post.id)}</span>
-                <span>💬 {get_comment_count(post.id)}</span>
-            </div>
-            
-            <div class="post-actions">
-                <a href="/like_post/{post.id}" class="btn btn-small btn-like">❤️ Нравится</a>
-                <button onclick="document.getElementById('comment-form-{post.id}').style.display='block'" class="btn btn-small btn-comment">💬 Комментировать</button>
-                <button onclick="confirmReport('post', {post.id})" class="btn btn-small btn-report">🚫 Пожаловаться</button>
-                <a href="/profile/{post.author.id}" class="btn btn-small btn-secondary">👤 Профиль</a>
-                {f'<a href="/follow/{post.author.id}" class="btn btn-small btn-follow">➕ Подписаться</a>' if not is_following(current_user.id, post.author.id) and post.author.id != current_user.id else ''}
-                {f'<button onclick="confirmDelete(\'пост\', {post.id})" class="btn btn-small btn-danger">🗑 Удалить</button>' if post.user_id == current_user.id else ''}
-            </div>
-            
-            <div id="comment-form-{post.id}" style="display: none; margin-top: 15px;">
-                <form method="POST" action="/add_comment/{post.id}">
-                    <textarea name="content" id="comment-{post.id}" class="form-input" placeholder="Добавить комментарий..." style="min-height: 60px;"></textarea>
-                    <button type="button" class="btn btn-small" onclick="toggleEmojiPicker('comment-{post.id}')" style="margin-top: 5px;">😊 Смайлик</button>
-                    <button type="submit" class="btn btn-small" style="margin-top: 5px;">Отправить</button>
-                    
-                    <div id="comment-{post.id}-picker" class="emoji-picker" style="display: none;">
-                        <button type="button" class="emoji-btn" onclick="insertEmoji('comment-{post.id}', '😊')">😊</button>
-                        <button type="button" class="emoji-btn" onclick="insertEmoji('comment-{post.id}', '😂')">😂</button>
-                        <button type="button" class="emoji-btn" onclick="insertEmoji('comment-{post.id}', '👍')">👍</button>
-                        <button type="button" class="emoji-btn" onclick="insertEmoji('comment-{post.id}', '❤️')">❤️</button>
+            posts_html += f'''<div class="post">
+                <div class="post-header">
+                    <img src="/static/uploads/{post.author.avatar_filename}" class="avatar">
+                    <div>
+                        <div class="post-author">{post.author.first_name} {post.author.last_name}</div>
+                        <small>@{post.author.username}</small>
                     </div>
-                </form>
-            </div>
-            
-            <div class="comments-section" id="comments-{post.id}">
-                {get_comments_html(post.id)}
-            </div>
-        </div>'''
+                    <div class="post-time">{post.created_at.strftime('%d.%m.%Y %H:%M')}</div>
+                </div>
+                
+                <div class="post-content">{get_emoji_html(post.content)}</div>
+                
+                {media_html}
+                
+                <div class="post-stats">
+                    <span>👁️ {post.views_count}</span>
+                    <span>❤️ {get_like_count(post.id)}</span>
+                    <span>💬 {get_comment_count(post.id)}</span>
+                </div>
+                
+                <div class="post-actions">
+                    <a href="/like_post/{post.id}" class="btn btn-small btn-like">❤️ Нравится</a>
+                    <button onclick="document.getElementById('comment-form-{post.id}').style.display='block'" class="btn btn-small btn-comment">💬 Комментировать</button>
+                    <button onclick="confirmReport('post', {post.id})" class="btn btn-small btn-report">🚫 Пожаловаться</button>
+                    <a href="/profile/{post.author.id}" class="btn btn-small btn-secondary">👤 Профиль</a>
+                    {f'<a href="/follow/{post.author.id}" class="btn btn-small btn-follow">➕ Подписаться</a>' if not is_following(current_user.id, post.author.id) and post.author.id != current_user.id else ''}
+                    {f'<button onclick="confirmDelete(\'пост\', {post.id})" class="btn btn-small btn-danger">🗑 Удалить</button>' if post.user_id == current_user.id else ''}
+                </div>
+                
+                <div id="comment-form-{post.id}" style="display: none; margin-top: 15px;">
+                    <form method="POST" action="/add_comment/{post.id}">
+                        <textarea name="content" id="comment-{post.id}" class="form-input" placeholder="Добавить комментарий..." style="min-height: 60px;"></textarea>
+                        <button type="button" class="btn btn-small" onclick="toggleEmojiPicker('comment-{post.id}')" style="margin-top: 5px;">😊 Смайлик</button>
+                        <button type="submit" class="btn btn-small" style="margin-top: 5px;">Отправить</button>
+                        
+                        <div id="comment-{post.id}-picker" class="emoji-picker" style="display: none;">
+                            <button type="button" class="emoji-btn" onclick="insertEmoji('comment-{post.id}', '😊')">😊</button>
+                            <button type="button" class="emoji-btn" onclick="insertEmoji('comment-{post.id}', '😂')">😂</button>
+                            <button type="button" class="emoji-btn" onclick="insertEmoji('comment-{post.id}', '👍')">👍</button>
+                            <button type="button" class="emoji-btn" onclick="insertEmoji('comment-{post.id}', '❤️')">❤️</button>
+                        </div>
+                    </form>
+                </div>
+                
+                <div class="comments-section" id="comments-{post.id}">
+                    {get_comments_html(post.id)}
+                </div>
+            </div>'''
+        else:
+            # Рекламный пост
+            ad = item
+            posts_html += f'''<div class="advertisement approved">
+                <h3 style="color: #9c27b0;">📢 {ad.title}</h3>
+                <p>{ad.description}</p>
+                {f'<img src="/static/uploads/{ad.image_filename}" style="max-width: 100%; max-height: 300px; border-radius: 10px; margin: 10px 0;">' if ad.image_filename else ''}
+                {f'<video src="/static/uploads/{ad.video_filename}" controls style="max-width: 100%; max-height: 300px; border-radius: 10px; margin: 10px 0;"></video>' if ad.video_filename else ''}
+                <div style="margin-top: 10px; font-size: 0.9em; color: #666;">
+                    <small>Реклама • Создатель: @{ad.creator.username}</small>
+                </div>
+            </div>'''
     
-    content = f'''<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-        <h2 style="color: #2a5298;">📰 Лента новостей (только подписки)</h2>
+    unread_count = get_unread_messages_count(current_user.id)
+    messages_badge = f'<span class="unread-badge">{unread_count}</span>' if unread_count > 0 else ''
+    
+    # Проверяем, есть ли у пользователя сегодня день рождения
+    birthday_badge = ""
+    if current_user.birthday:
+        today = datetime.utcnow().date()
+        if current_user.birthday.month == today.month and current_user.birthday.day == today.day:
+            birthday_badge = '<span class="birthday-badge">🎂 Сегодня день рождения!</span>'
+    
+    content = f'''<div class="nav-menu">
+        <a href="/feed" class="nav-btn active">📰 Лента</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения{messages_badge}</a>
+        <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
+        <a href="/users" class="nav-btn">👥 Все пользователи</a>
+        <a href="/following" class="nav-btn">👥 Подписки</a>
+        <a href="/followers" class="nav-btn">👤 Подписчики</a>
+        <a href="/edit_profile" class="nav-btn">✏️ Редактировать</a>
+        <a href="/advertisements" class="btn btn-ad btn-small" style="margin-left: auto;">📢 Реклама</a>
+        {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
+        <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
+    </div>
+
+    <div class="feed-mode-selector">
+        <span style="font-weight: 600; color: #2a5298;">Режим ленты:</span>
+        <button class="mode-btn {'active' if current_user.feed_mode == 'following' else ''}" onclick="changeFeedMode('following')">Только подписки</button>
+        <button class="mode-btn {'active' if current_user.feed_mode == 'all' else ''}" onclick="changeFeedMode('all')">Все посты</button>
+        {birthday_badge}
+    </div>
+    
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h2 style="color: #2a5298;">📰 Лента новостей ({current_user.feed_mode})</h2>
         <div>
             <a href="/create_post" class="btn">📝 Создать пост</a>
-            <a href="/edit_profile" class="btn btn-secondary" style="margin-left: 10px;">👤 Профиль</a>
-            <a href="/following" class="btn btn-follow" style="margin-left: 10px;">👥 Подписки</a>
-            <a href="/messages" class="btn" style="margin-left: 10px;">💬 Сообщения</a>
-            {f'<a href="/admin/users" class="btn" style="background: #6f42c1; margin-left: 10px;">👑 Админ</a>' if current_user.is_admin else ''}
-            <a href="/logout" class="btn btn-danger" style="margin-left: 10px;">🚪 Выйти</a>
         </div>
     </div>
     
@@ -1699,6 +2072,7 @@ def feed():
 def get_comments_html(post_id):
     """Генерирует HTML для комментариев поста"""
     comments = Comment.query.filter_by(post_id=post_id, is_hidden=False).order_by(Comment.created_at).all()
+    post = Post.query.get(post_id)
     
     comments_html = ""
     for comment in comments:
@@ -1711,10 +2085,25 @@ def get_comments_html(post_id):
             <div class="comment-actions">
                 <button onclick="confirmReport('comment', {comment.id})" class="btn btn-small btn-report">🚫 Пожаловаться</button>
                 {f'<button onclick="confirmDelete(\'комментарий\', {comment.id})" class="btn btn-small btn-danger">🗑 Удалить</button>' if comment.user_id == current_user.id else ''}
+                {f'<button onclick="confirmDeleteOtherComment({comment.id})" class="btn btn-small btn-danger">🗑 Удалить (владелец поста)</button>' if post.user_id == current_user.id and comment.user_id != current_user.id else ''}
             </div>
         </div>'''
     
     return comments_html
+
+@app.route('/change_feed_mode/<mode>')
+@login_required
+def change_feed_mode(mode):
+    """Изменяет режим ленты пользователя"""
+    if mode not in ['following', 'all']:
+        flash('❌ Неверный режим ленты', 'error')
+        return redirect('/feed')
+    
+    current_user.feed_mode = mode
+    db.session.commit()
+    
+    flash(f'✅ Режим ленты изменен на "{mode}"', 'success')
+    return redirect('/feed')
 
 # ========== КОММЕНТАРИИ И ЛАЙКИ ==========
 @app.route('/like_post/<int:post_id>')
@@ -1782,11 +2171,28 @@ def add_comment(post_id):
 @app.route('/delete_comment/<int:comment_id>')
 @login_required
 def delete_comment(comment_id):
-    """Удалить комментарий"""
+    """Удалить свой комментарий"""
     comment = Comment.query.get_or_404(comment_id)
     
     if comment.user_id != current_user.id:
         flash('❌ Вы не можете удалить этот комментарий', 'error')
+        return redirect('/feed')
+    
+    db.session.delete(comment)
+    db.session.commit()
+    
+    flash('✅ Комментарий удален', 'success')
+    return redirect('/feed')
+
+@app.route('/delete_other_comment/<int:comment_id>')
+@login_required
+def delete_other_comment(comment_id):
+    """Владелец поста удаляет чужой комментарий"""
+    comment = Comment.query.get_or_404(comment_id)
+    post = Post.query.get(comment.post_id)
+    
+    if not post or post.user_id != current_user.id:
+        flash('❌ Вы можете удалять только комментарии под своими постами', 'error')
         return redirect('/feed')
     
     db.session.delete(comment)
@@ -1808,6 +2214,13 @@ def profile(user_id):
     followers_count = get_followers_count(user_id)
     following_count = get_following_count(user_id)
     is_following_user = is_following(current_user.id, user_id)
+    
+    # Проверяем день рождения
+    birthday_badge = ""
+    if user.birthday:
+        today = datetime.utcnow().date()
+        if user.birthday.month == today.month and user.birthday.day == today.day:
+            birthday_badge = '<span class="birthday-badge">🎂 День рождения!</span>'
     
     # Получаем посты пользователя
     user_posts = Post.query.filter_by(user_id=user_id, is_hidden=False).order_by(Post.created_at.desc()).limit(10).all()
@@ -1840,22 +2253,32 @@ def profile(user_id):
             {media_html}
             
             <div class="post-stats">
+                <span>👁️ {post.views_count}</span>
                 <span>❤️ {get_like_count(post.id)}</span>
                 <span>💬 {get_comment_count(post.id)}</span>
             </div>
             
             <div class="post-actions">
+                <a href="/like_post/{post.id}" class="btn btn-small btn-like">❤️ Нравится</a>
+                <button onclick="confirmReport('post', {post.id})" class="btn btn-small btn-report">🚫 Пожаловаться</button>
                 {f'<button onclick="confirmDelete(\'пост\', {post.id})" class="btn btn-small btn-danger">🗑 Удалить</button>' if user_id == current_user.id else ''}
             </div>
         </div>'''
     
+    unread_count = get_unread_messages_count(current_user.id)
+    messages_badge = f'<span class="unread-badge">{unread_count}</span>' if unread_count > 0 else ''
+    
+    birthday_text = f"<p>🎂 Дата рождения: {user.birthday.strftime('%d.%m.%Y') if user.birthday else 'Не указана'}</p>"
+    
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
-        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения{messages_badge}</a>
         <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
         <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/following" class="nav-btn">👥 Подписки</a>
         <a href="/followers" class="nav-btn">👤 Подписчики</a>
+        <a href="/edit_profile" class="nav-btn">✏️ Редактировать</a>
+        <a href="/advertisements" class="btn btn-ad btn-small" style="margin-left: auto;">📢 Реклама</a>
         {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
         <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
     </div>
@@ -1863,10 +2286,12 @@ def profile(user_id):
     <div class="profile-header">
         <img src="/static/uploads/{user.avatar_filename}" class="profile-avatar">
         <div class="profile-info">
-            <h2>{user.first_name} {user.last_name}</h2>
+            <h2>{user.first_name} {user.last_name} {birthday_badge}</h2>
             <p>@{user.username}</p>
             <p>📧 {user.email}</p>
+            {birthday_text}
             <p>📅 Зарегистрирован: {user.created_at.strftime('%d.%m.%Y')}</p>
+            <p>📰 Режим ленты: {'Только подписки' if user.feed_mode == 'following' else 'Все посты'}</p>
             
             <div class="follow-stats">
                 <div class="follow-stat">
@@ -1909,11 +2334,14 @@ def profile(user_id):
     
     return render_page(f'Профиль {user.username}', content)
 
-# ========== ЛИЧНЫЕ СООБЩЕНИЯ С ЭМОДЗИ ==========
+# ========== ЛИЧНЫЕ СООБЩЕНИЯ С РАЗДЕЛЕНИЕМ ==========
 @app.route('/messages/<int:receiver_id>', methods=['GET', 'POST'])
 @login_required
 def messages(receiver_id):
     receiver = User.query.get_or_404(receiver_id)
+    
+    # Помечаем сообщения как прочитанные
+    mark_messages_as_read(receiver_id, current_user.id)
     
     if request.method == 'POST':
         content = request.form['content']
@@ -1955,13 +2383,18 @@ def messages(receiver_id):
             {f'<div style="margin-top: 5px;"><button onclick="confirmDelete(\'сообщение\', {msg.id})" class="btn btn-small btn-danger">🗑 Удалить</button></div>' if msg.sender_id == current_user.id else ''}
         </div>'''
     
+    unread_count = get_unread_messages_count(current_user.id)
+    messages_badge = f'<span class="unread-badge">{unread_count}</span>' if unread_count > 0 else ''
+    
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
-        <a href="/messages" class="nav-btn active">💬 Сообщения</a>
+        <a href="/messages" class="nav-btn active">💬 Сообщения{messages_badge}</a>
         <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
         <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/following" class="nav-btn">👥 Подписки</a>
         <a href="/followers" class="nav-btn">👤 Подписчики</a>
+        <a href="/edit_profile" class="nav-btn">✏️ Редактировать</a>
+        <a href="/advertisements" class="btn btn-ad btn-small" style="margin-left: auto;">📢 Реклама</a>
         {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
         <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
     </div>
@@ -2003,31 +2436,112 @@ def messages(receiver_id):
 @app.route('/messages')
 @login_required
 def messages_list():
-    """Список диалогов"""
-    users = User.query.filter(User.id != current_user.id).all()
+    """Список диалогов с разделением на существующие диалоги и новых пользователей"""
     
-    users_html = ""
-    for user in users:
-        users_html += f'''<div class="card" style="margin-bottom: 10px;">
-            <div style="display: flex; align-items: center; justify-content: space-between;">
-                <div style="display: flex; align-items: center; gap: 15px;">
-                    <img src="/static/uploads/{user.avatar_filename}" style="width: 50px; height: 50px; border-radius: 50%; object-fit: cover;">
-                    <div>
-                        <div style="font-weight: 600;">{user.first_name} {user.last_name}</div>
-                        <small>@{user.username}</small>
+    # Получаем пользователей, с которыми есть переписка
+    conversation_partners = get_users_with_conversation(current_user.id)
+    users_with_unread = get_users_with_unread_messages(current_user.id)
+    
+    # Получаем детальную информацию о пользователях с перепиской
+    conversation_users = []
+    for user_id in conversation_partners:
+        user = User.query.get(user_id)
+        if user and user.id != current_user.id:
+            # Получаем последнее сообщение
+            last_message = Message.query.filter(
+                ((Message.sender_id == current_user.id) & (Message.receiver_id == user.id)) |
+                ((Message.sender_id == user.id) & (Message.receiver_id == current_user.id))
+            ).order_by(Message.created_at.desc()).first()
+            
+            # Количество непрочитанных сообщений от этого пользователя
+            unread_from_user = Message.query.filter_by(
+                sender_id=user.id, 
+                receiver_id=current_user.id, 
+                is_read=False
+            ).count()
+            
+            conversation_users.append({
+                'id': user.id,
+                'username': user.username,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'avatar': user.avatar_filename,
+                'last_message': last_message.content[:50] + '...' if last_message and len(last_message.content) > 50 else last_message.content if last_message else '',
+                'last_message_time': last_message.created_at if last_message else None,
+                'unread_count': unread_from_user
+            })
+    
+    # Сортируем по времени последнего сообщения
+    conversation_users.sort(key=lambda x: x['last_message_time'] or datetime.min, reverse=True)
+    
+    # Получаем всех пользователей для раздела "Начать диалог"
+    all_users = User.query.filter(User.id != current_user.id).all()
+    
+    # Исключаем тех, с кем уже есть переписка
+    new_users = [user for user in all_users if user.id not in conversation_partners]
+    
+    # Исключаем заблокированных
+    blocked_ids = [b.blocked_id for b in BlockedUser.query.filter_by(blocker_id=current_user.id).all()]
+    new_users = [user for user in new_users if user.id not in blocked_ids]
+    
+    unread_count = get_unread_messages_count(current_user.id)
+    messages_badge = f'<span class="unread-badge">{unread_count}</span>' if unread_count > 0 else ''
+    
+    # HTML для существующих диалогов
+    conversations_html = ""
+    if conversation_users:
+        for user in conversation_users:
+            unread_badge = f'<span class="unread-badge">{user["unread_count"]}</span>' if user['unread_count'] > 0 else ''
+            last_message_time = user['last_message_time'].strftime('%H:%M') if user['last_message_time'] else ''
+            
+            conversations_html += f'''<div class="card" style="margin-bottom: 10px; position: relative;">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <div style="display: flex; align-items: center; gap: 15px;">
+                        <img src="/static/uploads/{user['avatar']}" style="width: 50px; height: 50px; border-radius: 50%; object-fit: cover;">
+                        <div>
+                            <div style="font-weight: 600; display: flex; align-items: center;">
+                                {user['first_name']} {user['last_name']}
+                                {unread_badge}
+                            </div>
+                            <small>@{user['username']}</small>
+                            {f'<div style="font-size: 0.9em; color: #666; margin-top: 5px;">{user["last_message"]}</div>' if user['last_message'] else ''}
+                            {f'<div style="font-size: 0.8em; color: #999;">{last_message_time}</div>' if last_message_time else ''}
+                        </div>
                     </div>
+                    <a href="/messages/{user['id']}" class="btn btn-small">💬 Открыть</a>
                 </div>
-                <a href="/messages/{user.id}" class="btn btn-small">💬 Написать</a>
-            </div>
-        </div>'''
+            </div>'''
+    else:
+        conversations_html = '<p style="text-align: center; color: #666; padding: 20px;">У вас пока нет диалогов.</p>'
+    
+    # HTML для новых пользователей
+    new_users_html = ""
+    if new_users:
+        for user in new_users[:20]:  # Ограничиваем 20 пользователями
+            new_users_html += f'''<div class="card" style="margin-bottom: 10px;">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <div style="display: flex; align-items: center; gap: 15px;">
+                        <img src="/static/uploads/{user.avatar_filename}" style="width: 50px; height: 50px; border-radius: 50%; object-fit: cover;">
+                        <div>
+                            <div style="font-weight: 600;">{user.first_name} {user.last_name}</div>
+                            <small>@{user.username}</small>
+                        </div>
+                    </div>
+                    <a href="/messages/{user.id}" class="btn btn-small">💬 Написать</a>
+                </div>
+            </div>'''
+    else:
+        new_users_html = '<p style="text-align: center; color: #666; padding: 20px;">Нет новых пользователей для общения.</p>'
     
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
-        <a href="/messages" class="nav-btn active">💬 Сообщения</a>
+        <a href="/messages" class="nav-btn active">💬 Сообщения{messages_badge}</a>
         <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
         <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/following" class="nav-btn">👥 Подписки</a>
         <a href="/followers" class="nav-btn">👤 Подписчики</a>
+        <a href="/edit_profile" class="nav-btn">✏️ Редактировать</a>
+        <a href="/advertisements" class="btn btn-ad btn-small" style="margin-left: auto;">📢 Реклама</a>
         {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
         <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
     </div>
@@ -2039,12 +2553,225 @@ def messages_list():
             <a href="/feed" class="btn btn-secondary">← Назад в ленту</a>
         </div>
         
-        <h3 style="color: #2a5298; margin-bottom: 15px;">Выберите пользователя для общения:</h3>
+        <h3 style="color: #2a5298; margin: 30px 0 15px 0;">📨 Мои диалоги</h3>
+        {conversations_html}
         
-        {users_html if users_html else '<p style="text-align: center; color: #666; padding: 20px;">Нет других пользователей.</p>'}
+        <h3 style="color: #2a5298; margin: 30px 0 15px 0;">👤 Начать новый диалог</h3>
+        {new_users_html}
     </div>'''
     
     return render_page('Сообщения', content)
+
+# ========== РЕКЛАМА ==========
+@app.route('/advertisements')
+@login_required
+def advertisements():
+    """Страница управления рекламой"""
+    user_ads = Advertisement.query.filter_by(user_id=current_user.id).order_by(Advertisement.created_at.desc()).all()
+    
+    ads_html = ""
+    if user_ads:
+        for ad in user_ads:
+            status_class = ad.status
+            status_text = {
+                'pending': '⏳ На рассмотрении',
+                'approved': '✅ Одобрено',
+                'rejected': '❌ Отклонено',
+                'active': '📢 Активно'
+            }.get(ad.status, ad.status)
+            
+            ads_html += f'''<div class="advertisement {status_class}">
+                <h3>{ad.title}</h3>
+                <p>{ad.description}</p>
+                {f'<img src="/static/uploads/{ad.image_filename}" style="max-width: 100%; max-height: 200px; border-radius: 10px; margin: 10px 0;">' if ad.image_filename else ''}
+                {f'<video src="/static/uploads/{ad.video_filename}" controls style="max-width: 100%; max-height: 200px; border-radius: 10px; margin: 10px 0;"></video>' if ad.video_filename else ''}
+                <div style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <strong>Статус:</strong> {status_text}<br>
+                        <small>Создано: {ad.created_at.strftime('%d.%m.%Y %H:%M')}</small>
+                        {f'<br><small><strong>Примечание администратора:</strong> {ad.admin_notes}</small>' if ad.admin_notes else ''}
+                    </div>
+                    {f'<button onclick="confirmDeleteAd({ad.id})" class="btn btn-small btn-danger">🗑 Удалить</button>' if ad.status in ['pending', 'rejected'] else ''}
+                </div>
+            </div>'''
+    else:
+        ads_html = '<p style="text-align: center; color: #666; padding: 40px;">У вас пока нет рекламных предложений.</p>'
+    
+    unread_count = get_unread_messages_count(current_user.id)
+    messages_badge = f'<span class="unread-badge">{unread_count}</span>' if unread_count > 0 else ''
+    
+    content = f'''<div class="nav-menu">
+        <a href="/feed" class="nav-btn">📰 Лента</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения{messages_badge}</a>
+        <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
+        <a href="/users" class="nav-btn">👥 Все пользователи</a>
+        <a href="/following" class="nav-btn">👥 Подписки</a>
+        <a href="/followers" class="nav-btn">👤 Подписчики</a>
+        <a href="/edit_profile" class="nav-btn">✏️ Редактировать</a>
+        <a href="/advertisements" class="nav-btn active">📢 Реклама</a>
+        {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
+        <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
+    </div>
+
+    <div class="card">
+        <h2 style="color: #2a5298; margin-bottom: 25px;">📢 Рекламные предложения</h2>
+        
+        <p style="margin-bottom: 20px; color: #666;">
+            Здесь вы можете создать рекламное предложение для размещения в социальной сети. 
+            Администратор рассмотрит ваше предложение и свяжется с вами для обсуждения деталей.
+        </p>
+        
+        <div style="margin-bottom: 30px;">
+            <a href="/create_advertisement" class="btn btn-ad">➕ Создать рекламное предложение</a>
+        </div>
+        
+        <h3 style="color: #2a5298; margin-bottom: 20px;">Мои предложения</h3>
+        
+        {ads_html}
+    </div>
+    
+    <script>
+    function confirmDeleteAd(adId) {{
+        if (confirm('Вы уверены, что хотите удалить это рекламное предложение?')) {{
+            window.location.href = '/delete_advertisement/' + adId;
+        }}
+    }}
+    </script>'''
+    
+    return render_page('Реклама', content)
+
+@app.route('/create_advertisement', methods=['GET', 'POST'])
+@login_required
+def create_advertisement():
+    """Создание рекламного предложения"""
+    if request.method == 'POST':
+        title = request.form['title']
+        description = request.form['description']
+        
+        if not title.strip() or not description.strip():
+            flash('❌ Заголовок и описание обязательны', 'error')
+            return redirect('/create_advertisement')
+        
+        # Сохраняем изображение
+        image_filename = None
+        if 'image' in request.files:
+            file = request.files['image']
+            if file.filename:
+                image_filename = save_file(file, 'image')
+        
+        # Сохраняем видео
+        video_filename = None
+        if 'video' in request.files:
+            file = request.files['video']
+            if file.filename:
+                video_filename = save_file(file, 'video')
+        
+        new_ad = Advertisement(
+            user_id=current_user.id,
+            title=title,
+            description=description,
+            image_filename=image_filename,
+            video_filename=video_filename,
+            status='pending'
+        )
+        
+        db.session.add(new_ad)
+        db.session.commit()
+        
+        flash('✅ Рекламное предложение отправлено на рассмотрение администратору', 'success')
+        return redirect('/advertisements')
+    
+    unread_count = get_unread_messages_count(current_user.id)
+    messages_badge = f'<span class="unread-badge">{unread_count}</span>' if unread_count > 0 else ''
+    
+    content = f'''<div class="nav-menu">
+        <a href="/feed" class="nav-btn">📰 Лента</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения{messages_badge}</a>
+        <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
+        <a href="/users" class="nav-btn">👥 Все пользователи</a>
+        <a href="/following" class="nav-btn">👥 Подписки</a>
+        <a href="/followers" class="nav-btn">👤 Подписчики</a>
+        <a href="/edit_profile" class="nav-btn">✏️ Редактировать</a>
+        <a href="/advertisements" class="nav-btn active">📢 Реклама</a>
+        {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
+        <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
+    </div>
+
+    <div class="card">
+        <h2 style="color: #2a5298; margin-bottom: 25px;">Создание рекламного предложения</h2>
+        
+        <form method="POST" action="/create_advertisement" enctype="multipart/form-data">
+            <div class="form-group">
+                <label class="form-label">📝 Заголовок</label>
+                <input type="text" name="title" class="form-input" placeholder="Название вашей рекламы" required>
+            </div>
+            
+            <div class="form-group">
+                <label class="form-label">📋 Описание</label>
+                <textarea name="description" class="form-input" rows="5" placeholder="Подробное описание рекламы, контактная информация и т.д." required></textarea>
+            </div>
+            
+            <div class="form-group">
+                <label class="form-label">🖼️ Изображение (опционально)</label>
+                <input type="file" name="image" accept="image/*">
+                <small style="color: #666;">Поддерживаемые форматы: PNG, JPG, JPEG, GIF</small>
+            </div>
+            
+            <div class="form-group">
+                <label class="form-label">🎬 Видео (опционально)</label>
+                <input type="file" name="video" accept="video/*">
+                <small style="color: #666;">Поддерживаемые форматы: MP4, MOV, AVI, MKV</small>
+            </div>
+            
+            <div style="margin-top: 25px; padding: 15px; background: #f8f9fa; border-radius: 10px; border-left: 4px solid #ffc107;">
+                <h4 style="color: #856404;">📋 Что происходит после отправки?</h4>
+                <ol style="margin-top: 10px; padding-left: 20px; color: #666;">
+                    <li>Ваше предложение отправляется администратору на рассмотрение</li>
+                    <li>Администратор свяжется с вами через личные сообщения</li>
+                    <li>После согласования деталей реклама будет активирована</li>
+                    <li>Реклама может отображаться в ленте или в боковой панели</li>
+                </ol>
+            </div>
+            
+            <div style="display: flex; gap: 10px; margin-top: 30px;">
+                <button type="submit" class="btn btn-ad">📤 Отправить на рассмотрение</button>
+                <a href="/advertisements" class="btn btn-secondary">❌ Отмена</a>
+            </div>
+        </form>
+    </div>'''
+    
+    return render_page('Создание рекламы', content)
+
+@app.route('/delete_advertisement/<int:ad_id>')
+@login_required
+def delete_advertisement(ad_id):
+    """Удаление рекламного предложения"""
+    ad = Advertisement.query.get_or_404(ad_id)
+    
+    if ad.user_id != current_user.id:
+        flash('❌ Вы не можете удалить это рекламное предложение', 'error')
+        return redirect('/advertisements')
+    
+    if ad.status not in ['pending', 'rejected']:
+        flash('❌ Нельзя удалить одобренное или активное рекламное предложение', 'error')
+        return redirect('/advertisements')
+    
+    # Удаляем файлы
+    if ad.image_filename:
+        image_path = os.path.join(app.config['UPLOAD_FOLDER'], ad.image_filename)
+        if os.path.exists(image_path):
+            os.remove(image_path)
+    
+    if ad.video_filename:
+        video_path = os.path.join(app.config['UPLOAD_FOLDER'], ad.video_filename)
+        if os.path.exists(video_path):
+            os.remove(video_path)
+    
+    db.session.delete(ad)
+    db.session.commit()
+    
+    flash('✅ Рекламное предложение удалено', 'success')
+    return redirect('/advertisements')
 
 # ========== ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ ==========
 @app.route('/report/<item_type>/<int:item_id>')
@@ -2148,13 +2875,18 @@ def blocked_users():
     else:
         blocked_html = '<p style="text-align: center; color: #666; padding: 20px;">Вы никого не заблокировали.</p>'
     
+    unread_count = get_unread_messages_count(current_user.id)
+    messages_badge = f'<span class="unread-badge">{unread_count}</span>' if unread_count > 0 else ''
+    
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
-        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения{messages_badge}</a>
         <a href="/blocked_users" class="nav-btn active">🚫 Заблокированные</a>
         <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/following" class="nav-btn">👥 Подписки</a>
         <a href="/followers" class="nav-btn">👤 Подписчики</a>
+        <a href="/edit_profile" class="nav-btn">✏️ Редактировать</a>
+        <a href="/advertisements" class="btn btn-ad btn-small" style="margin-left: auto;">📢 Реклама</a>
         {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
         <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
     </div>
@@ -2242,13 +2974,18 @@ def users():
     else:
         users_html = '<p style="text-align: center; color: #666; padding: 40px;">Пользователи не найдены.</p>'
     
+    unread_count = get_unread_messages_count(current_user.id)
+    messages_badge = f'<span class="unread-badge">{unread_count}</span>' if unread_count > 0 else ''
+    
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
-        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения{messages_badge}</a>
         <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
         <a href="/users" class="nav-btn active">👥 Все пользователи</a>
         <a href="/following" class="nav-btn">👥 Подписки</a>
         <a href="/followers" class="nav-btn">👤 Подписчики</a>
+        <a href="/edit_profile" class="nav-btn">✏️ Редактировать</a>
+        <a href="/advertisements" class="btn btn-ad btn-small" style="margin-left: auto;">📢 Реклама</a>
         {f'<a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Админ</a>' if current_user.is_admin else ''}
         <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
     </div>
@@ -2270,7 +3007,7 @@ def users():
     
     return render_page('Пользователи', content)
 
-# ========== АДМИН-ПАНЕЛЬ ==========
+# ========== АДМИН-ПАНЕЛЬ С ПОЛНОЙ ИНФОРМАЦИЕЙ ==========
 @app.route('/admin/users')
 @login_required
 def admin_users():
@@ -2296,7 +3033,21 @@ def admin_users():
         for user in users_list:
             # Подсчет постов и сообщений пользователя
             posts_count = Post.query.filter_by(user_id=user.id).count()
-            messages_count = Message.query.filter_by(sender_id=user.id).count()
+            messages_sent = Message.query.filter_by(sender_id=user.id).count()
+            messages_received = Message.query.filter_by(receiver_id=user.id).count()
+            comments_count = Comment.query.filter_by(user_id=user.id).count()
+            likes_count = Like.query.filter_by(user_id=user.id).count()
+            following_count = get_following_count(user.id)
+            followers_count = get_followers_count(user.id)
+            
+            # Получаем информацию о дне рождения
+            birthday_info = ""
+            if user.birthday:
+                today = datetime.utcnow().date()
+                age = today.year - user.birthday.year - ((today.month, today.day) < (user.birthday.month, user.birthday.day))
+                birthday_info = f"<br><small>Дата рождения: {user.birthday.strftime('%d.%m.%Y')} ({age} лет)</small>"
+                if user.birthday.month == today.month and user.birthday.day == today.day:
+                    birthday_info += " <span class='birthday-badge'>🎂 Сегодня!</span>"
             
             users_html += f'''<div class="user-card">
                 <img src="/static/uploads/{user.avatar_filename}" class="user-avatar">
@@ -2304,16 +3055,26 @@ def admin_users():
                 <small>@{user.username}</small>
                 <div style="margin: 10px 0;">
                     <small>Email: {user.email}</small><br>
-                    <small>Зарегистрирован: {user.created_at.strftime('%d.%m.%Y')}</small><br>
-                    <small>Постов: {posts_count} | Сообщений: {messages_count}</small>
+                    <small>Зарегистрирован: {user.created_at.strftime('%d.%m.%Y %H:%M')}</small>
+                    {birthday_info}
+                    <br>
+                    <small>Режим ленты: {'Только подписки' if user.feed_mode == 'following' else 'Все посты'}</small>
+                </div>
+                <div style="margin: 10px 0; font-size: 0.8em; color: #666; background: #f8f9fa; padding: 10px; border-radius: 5px;">
+                    <strong>Статистика:</strong><br>
+                    📝 Постов: {posts_count} | 💬 Комментариев: {comments_count}<br>
+                    ❤️ Лайков: {likes_count} | 👥 Подписок: {following_count}<br>
+                    👤 Подписчиков: {followers_count} | ✉️ Сообщений: {messages_sent}/{messages_received}
                 </div>
                 <div style="margin: 10px 0;">
                     {f'<span class="admin-label">👑 Админ</span>' if user.is_admin else ''}
                     {f'<span class="banned-label">🚫 Забанен</span>' if user.is_banned else ''}
                     {f'<span style="color: #28a745;">✅ Активен</span>' if user.is_active and not user.is_banned else ''}
+                    {f'<span style="color: #17a2b8;">📧 Подтвержден</span>' if user.email_verified else '<span style="color: #ffc107;">📧 Не подтвержден</span>'}
                 </div>
                 <div style="display: flex; gap: 5px; margin-top: 10px; flex-wrap: wrap;">
                     <a href="/profile/{user.id}" class="btn btn-small btn-secondary">👤 Профиль</a>
+                    <a href="/admin/user_details/{user.id}" class="btn btn-small btn-info">📊 Подробно</a>
                     {f'<button onclick="confirmBan({user.id}, \'{user.username}\')" class="btn btn-small btn-danger">🚫 Забанить</button>' if not user.is_banned and user.id != current_user.id else ''}
                     {f'<button onclick="confirmUnban({user.id}, \'{user.username}\')" class="btn btn-small btn-success">✅ Разбанить</button>' if user.is_banned else ''}
                     {f'<button onclick="confirmDeleteAccount({user.id}, \'{user.username}\')" class="btn btn-small btn-danger">🗑 Удалить аккаунт</button>' if user.id != current_user.id else ''}
@@ -2329,15 +3090,21 @@ def admin_users():
     active_users = User.query.filter_by(is_active=True, is_banned=False).count()
     banned_users = User.query.filter_by(is_banned=True).count()
     admins = User.query.filter_by(is_admin=True).count()
+    total_posts = Post.query.count()
+    total_messages = Message.query.count()
+    
+    unread_count = get_unread_messages_count(current_user.id)
+    messages_badge = f'<span class="unread-badge">{unread_count}</span>' if unread_count > 0 else ''
     
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
-        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения{messages_badge}</a>
         <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
         <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/admin/users" class="nav-btn active" style="background: #6f42c1; border-color: #6f42c1;">👑 Управление пользователями</a>
         <a href="/admin/reports" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">📊 Жалобы</a>
         <a href="/admin/admins" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Администраторы</a>
+        <a href="/admin/ads" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">📢 Реклама</a>
         <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
     </div>
 
@@ -2363,6 +3130,17 @@ def admin_users():
             </div>
         </div>
         
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 25px;">
+            <div style="background: #fff3cd; padding: 15px; border-radius: 10px; text-align: center;">
+                <h3 style="color: #856404;">{total_posts}</h3>
+                <p>Всего постов</p>
+            </div>
+            <div style="background: #d1ecf1; padding: 15px; border-radius: 10px; text-align: center;">
+                <h3 style="color: #0c5460;">{total_messages}</h3>
+                <p>Всего сообщений</p>
+            </div>
+        </div>
+        
         <form method="GET" action="/admin/users" style="margin-bottom: 25px;">
             <div class="form-group">
                 <input type="text" name="search" class="form-input" placeholder="🔍 Поиск пользователей..." value="{search_query}">
@@ -2377,172 +3155,38 @@ def admin_users():
     
     return render_page('Админ-панель - Пользователи', content)
 
-@app.route('/admin/ban_user/<int:user_id>')
+@app.route('/admin/user_details/<int:user_id>')
 @login_required
-def admin_ban_user(user_id):
-    """Бан пользователя администратором"""
+def admin_user_details(user_id):
+    """Подробная информация о пользователе для администратора"""
     if not current_user.is_admin:
         flash('❌ Доступ запрещен. Только для администраторов.', 'error')
         return redirect('/feed')
     
     user = User.query.get_or_404(user_id)
     
-    if user.id == current_user.id:
-        flash('❌ Нельзя забанить самого себя', 'error')
-        return redirect('/admin/users')
+    # Собираем подробную статистику
+    posts = Post.query.filter_by(user_id=user_id).all()
+    messages_sent = Message.query.filter_by(sender_id=user_id).all()
+    messages_received = Message.query.filter_by(receiver_id=user_id).all()
+    comments = Comment.query.filter_by(user_id=user_id).all()
+    likes = Like.query.filter_by(user_id=user_id).all()
+    following = Follow.query.filter_by(follower_id=user_id).all()
+    followers = Follow.query.filter_by(followed_id=user_id).all()
+    blocked_users = BlockedUser.query.filter_by(blocker_id=user_id).all()
+    blocked_by = BlockedUser.query.filter_by(blocked_id=user_id).all()
+    advertisements = Advertisement.query.filter_by(user_id=user_id).all()
     
-    if user.is_banned:
-        flash(f'❌ Пользователь {user.username} уже забанен', 'error')
-        return redirect('/admin/users')
+    # Вычисляем возраст
+    age = None
+    if user.birthday:
+        today = datetime.utcnow().date()
+        age = today.year - user.birthday.year - ((today.month, today.day) < (user.birthday.month, user.birthday.day))
     
-    user.is_banned = True
-    db.session.commit()
-    
-    flash(f'✅ Пользователь {user.username} забанен', 'success')
-    return redirect('/admin/users')
-
-@app.route('/admin/unban_user/<int:user_id>')
-@login_required
-def admin_unban_user(user_id):
-    """Разбан пользователя администратором"""
-    if not current_user.is_admin:
-        flash('❌ Доступ запрещен. Только для администраторов.', 'error')
-        return redirect('/feed')
-    
-    user = User.query.get_or_404(user_id)
-    
-    if not user.is_banned:
-        flash(f'❌ Пользователь {user.username} не забанен', 'error')
-        return redirect('/admin/users')
-    
-    user.is_banned = False
-    db.session.commit()
-    
-    flash(f'✅ Пользователь {user.username} разбанен', 'success')
-    return redirect('/admin/users')
-
-@app.route('/admin/delete_user/<int:user_id>')
-@login_required
-def admin_delete_user(user_id):
-    """Удаление аккаунта пользователя администратором"""
-    if not current_user.is_admin:
-        flash('❌ Доступ запрещен. Только для администраторов.', 'error')
-        return redirect('/feed')
-    
-    user = User.query.get_or_404(user_id)
-    
-    if user.id == current_user.id:
-        flash('❌ Нельзя удалить свой собственный аккаунт', 'error')
-        return redirect('/admin/users')
-    
-    username = user.username
-    
-    # Удаляем все посты пользователя
-    Post.query.filter_by(user_id=user_id).delete()
-    
-    # Удаляем все сообщения пользователя
-    Message.query.filter_by(sender_id=user_id).delete()
-    Message.query.filter_by(receiver_id=user_id).delete()
-    
-    # Удаляем все комментарии пользователя
-    Comment.query.filter_by(user_id=user_id).delete()
-    
-    # Удаляем все лайки пользователя
-    Like.query.filter_by(user_id=user_id).delete()
-    
-    # Удаляем все подписки пользователя
-    Follow.query.filter_by(follower_id=user_id).delete()
-    Follow.query.filter_by(followed_id=user_id).delete()
-    
-    # Удаляем блокировки пользователя
-    BlockedUser.query.filter_by(blocker_id=user_id).delete()
-    BlockedUser.query.filter_by(blocked_id=user_id).delete()
-    
-    # Удаляем пользователя
-    db.session.delete(user)
-    db.session.commit()
-    
-    flash(f'✅ Аккаунт пользователя {username} удален', 'success')
-    return redirect('/admin/users')
-
-@app.route('/admin/make_admin/<int:user_id>')
-@login_required
-def make_admin(user_id):
-    """Назначить пользователя администратором"""
-    if not current_user.is_admin:
-        flash('❌ Доступ запрещен. Только для администраторов.', 'error')
-        return redirect('/feed')
-    
-    user = User.query.get_or_404(user_id)
-    
-    if user.is_admin:
-        flash(f'❌ Пользователь {user.username} уже администратор', 'error')
-        return redirect('/admin/users')
-    
-    user.is_admin = True
-    db.session.commit()
-    
-    flash(f'✅ Пользователь {user.username} назначен администратором', 'success')
-    return redirect('/admin/users')
-
-@app.route('/admin/remove_admin/<int:user_id>')
-@login_required
-def remove_admin(user_id):
-    """Снять права администратора"""
-    if not current_user.is_admin:
-        flash('❌ Доступ запрещен. Только для администраторов.', 'error')
-        return redirect('/feed')
-    
-    user = User.query.get_or_404(user_id)
-    
-    if user.id == current_user.id:
-        flash('❌ Нельзя снять права администратора у самого себя', 'error')
-        return redirect('/admin/users')
-    
-    if not user.is_admin:
-        flash(f'❌ Пользователь {user.username} не является администратором', 'error')
-        return redirect('/admin/users')
-    
-    user.is_admin = False
-    db.session.commit()
-    
-    flash(f'✅ Права администратора сняты у пользователя {user.username}', 'success')
-    return redirect('/admin/users')
-
-@app.route('/admin/admins')
-@login_required
-def admin_admins():
-    """Управление администраторами"""
-    if not current_user.is_admin:
-        flash('❌ Доступ запрещен. Только для администраторов.', 'error')
-        return redirect('/feed')
-    
-    admins = User.query.filter_by(is_admin=True).all()
-    
-    admins_html = ""
-    for admin in admins:
-        posts_count = Post.query.filter_by(user_id=admin.id).count()
-        comments_count = Comment.query.filter_by(user_id=admin.id).count()
-        
-        admins_html += f'''<div class="user-card">
-            <img src="/static/uploads/{admin.avatar_filename}" class="user-avatar">
-            <div class="user-name">{admin.first_name} {admin.last_name}</div>
-            <small>@{admin.username}</small>
-            <div style="margin: 10px 0;">
-                <small>Email: {admin.email}</small><br>
-                <small>Зарегистрирован: {admin.created_at.strftime('%d.%m.%Y')}</small><br>
-                <small>Постов: {posts_count} | Комментариев: {comments_count}</small>
-            </div>
-            <div style="margin: 10px 0;">
-                <span class="admin-label">👑 Администратор</span>
-                {f'<span class="banned-label">🚫 Забанен</span>' if admin.is_banned else ''}
-            </div>
-            <div style="display: flex; gap: 5px; margin-top: 10px; flex-wrap: wrap;">
-                <a href="/profile/{admin.id}" class="btn btn-small btn-secondary">👤 Профиль</a>
-                {f'<button onclick="confirmRemoveAdmin({admin.id}, \'{admin.username}\')" class="btn btn-small btn-danger">👑 Снять права</button>' if admin.id != current_user.id else ''}
-                {f'<button onclick="confirmBan({admin.id}, \'{admin.username}\')" class="btn btn-small btn-danger">🚫 Забанить</button>' if not admin.is_banned and admin.id != current_user.id else ''}
-            </div>
-        </div>'''
+    # Статистика по активности
+    last_post = Post.query.filter_by(user_id=user_id).order_by(Post.created_at.desc()).first()
+    last_login = "Не отслеживается"  # В этой версии не отслеживаем логины
+    total_views = sum(post.views_count for post in posts)
     
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
@@ -2550,126 +3194,253 @@ def admin_admins():
         <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
         <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Пользователи</a>
-        <a href="/admin/admins" class="nav-btn active" style="background: #6f42c1; border-color: #6f42c1;">👑 Администраторы</a>
+        <a href="/admin/user_details/{user_id}" class="nav-btn active" style="background: #6f42c1; border-color: #6f42c1;">📊 Подробная информация</a>
         <a href="/admin/reports" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">📊 Жалобы</a>
         <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
     </div>
 
     <div class="card">
-        <h2 style="color: #6f42c1; margin-bottom: 20px;">👑 Управление администраторами</h2>
+        <h2 style="color: #6f42c1; margin-bottom: 25px;">📊 Подробная информация о пользователе</h2>
         
-        <div class="user-list">
-            {admins_html if admins_html else '<p style="text-align: center; color: #666; padding: 40px;">Нет администраторов.</p>'}
+        <div class="profile-header">
+            <img src="/static/uploads/{user.avatar_filename}" class="profile-avatar">
+            <div class="profile-info">
+                <h2>{user.first_name} {user.last_name}</h2>
+                <p>@{user.username}</p>
+                <p>📧 {user.email}</p>
+                <p>📅 Зарегистрирован: {user.created_at.strftime('%d.%m.%Y %H:%M:%S')}</p>
+                {f'<p>🎂 Дата рождения: {user.birthday.strftime("%d.%m.%Y")} ({age} лет)</p>' if user.birthday else '<p>🎂 Дата рождения: Не указана</p>'}
+                <p>📰 Режим ленты: {'Только подписки' if user.feed_mode == 'following' else 'Все посты'}</p>
+                
+                <div style="margin-top: 20px;">
+                    {f'<span class="admin-label">👑 Администратор</span>' if user.is_admin else ''}
+                    {f'<span class="banned-label">🚫 Забанен</span>' if user.is_banned else ''}
+                    {f'<span style="color: #28a745; padding: 3px 8px; border-radius: 10px; font-size: 12px; background: #d4edda;">✅ Активен</span>' if user.is_active else ''}
+                    {f'<span style="color: #17a2b8; padding: 3px 8px; border-radius: 10px; font-size: 12px; background: #d1ecf1;">📧 Email подтвержден</span>' if user.email_verified else '<span style="color: #ffc107; padding: 3px 8px; border-radius: 10px; font-size: 12px; background: #fff3cd;">📧 Email не подтвержден</span>'}
+                </div>
+            </div>
+        </div>
+        
+        <div style="margin-top: 30px;">
+            <h3 style="color: #2a5298; margin-bottom: 15px;">📈 Статистика активности</h3>
+            
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 25px;">
+                <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center;">
+                    <div style="font-size: 1.5em; font-weight: bold; color: #2a5298;">{len(posts)}</div>
+                    <div>Постов</div>
+                </div>
+                <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center;">
+                    <div style="font-size: 1.5em; font-weight: bold; color: #2a5298;">{len(comments)}</div>
+                    <div>Комментариев</div>
+                </div>
+                <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center;">
+                    <div style="font-size: 1.5em; font-weight: bold; color: #2a5298;">{len(likes)}</div>
+                    <div>Лайков</div>
+                </div>
+                <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center;">
+                    <div style="font-size: 1.5em; font-weight: bold; color: #2a5298;">{len(following)}</div>
+                    <div>Подписок</div>
+                </div>
+                <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center;">
+                    <div style="font-size: 1.5em; font-weight: bold; color: #2a5298;">{len(followers)}</div>
+                    <div>Подписчиков</div>
+                </div>
+                <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center;">
+                    <div style="font-size: 1.5em; font-weight: bold; color: #2a5298;">{len(messages_sent)}/{len(messages_received)}</div>
+                    <div>Сообщений отправлено/получено</div>
+                </div>
+            </div>
+            
+            <div style="background: #f8f9fa; padding: 20px; border-radius: 10px; margin-bottom: 20px;">
+                <h4 style="color: #2a5298; margin-bottom: 10px;">📊 Дополнительная статистика</h4>
+                <p>👁️ Всего просмотров постов: {total_views}</p>
+                <p>🚫 Заблокировал пользователей: {len(blocked_users)}</p>
+                <p>🚫 Заблокирован пользователями: {len(blocked_by)}</p>
+                <p>📢 Рекламных предложений: {len(advertisements)}</p>
+                {f'<p>📝 Последний пост: {last_post.created_at.strftime("%d.%m.%Y %H:%M") if last_post else "Нет постов"}</p>'}
+                <p>🔑 Последний вход: {last_login}</p>
+            </div>
+            
+            <div style="display: flex; gap: 10px; margin-top: 20px;">
+                <a href="/profile/{user.id}" class="btn btn-secondary">👤 Открыть профиль</a>
+                <a href="/admin/users" class="btn">← Назад к списку</a>
+                {f'<button onclick="confirmBan({user.id}, \'{user.username}\')" class="btn btn-danger">🚫 Забанить</button>' if not user.is_banned and user.id != current_user.id else ''}
+                {f'<button onclick="confirmUnban({user.id}, \'{user.username}\')" class="btn btn-success">✅ Разбанить</button>' if user.is_banned else ''}
+            </div>
         </div>
     </div>'''
     
-    return render_page('Админ-панель - Администраторы', content)
+    return render_page(f'Подробная информация - {user.username}', content)
 
-@app.route('/admin/reports')
+@app.route('/admin/ads')
 @login_required
-def admin_reports():
-    """Страница жалоб для администратора"""
+def admin_ads():
+    """Управление рекламой для администратора"""
     if not current_user.is_admin:
         flash('❌ Доступ запрещен. Только для администраторов.', 'error')
         return redirect('/feed')
     
-    # Получаем посты с жалобами
-    reported_posts = Post.query.filter(Post.reports_count > 0).order_by(Post.reports_count.desc()).all()
+    status_filter = request.args.get('status', 'all')
     
-    # Получаем сообщения с жалобами
-    reported_messages = Message.query.filter(Message.reports_count > 0).order_by(Message.reports_count.desc()).all()
+    if status_filter == 'all':
+        ads = Advertisement.query.order_by(Advertisement.created_at.desc()).all()
+    else:
+        ads = Advertisement.query.filter_by(status=status_filter).order_by(Advertisement.created_at.desc()).all()
     
-    # Получаем комментарии с жалобами
-    reported_comments = Comment.query.filter(Comment.reports_count > 0).order_by(Comment.reports_count.desc()).all()
-    
-    posts_html = ""
-    if reported_posts:
-        for post in reported_posts:
-            author = User.query.get(post.user_id)
-            posts_html += f'''<div class="post{' hidden' if post.is_hidden else ''}">
-                <div class="post-header">
-                    <img src="/static/uploads/{author.avatar_filename}" class="avatar" style="width: 40px; height: 40px;" alt="{author.username}">
-                    <div>
-                        <div class="post-author">{author.first_name} {author.last_name}</div>
-                        <small>@{author.username}</small>
-                    </div>
-                    <div class="post-time">{post.created_at.strftime('%d.%m.%Y %H:%M')}</div>
-                    <span class="warning-badge">⚠️ {post.reports_count} жалоб</span>
+    ads_html = ""
+    if ads:
+        for ad in ads:
+            creator = User.query.get(ad.user_id)
+            status_class = ad.status
+            status_text = {
+                'pending': '⏳ На рассмотрении',
+                'approved': '✅ Одобрено',
+                'rejected': '❌ Отклонено',
+                'active': '📢 Активно'
+            }.get(ad.status, ad.status)
+            
+            ads_html += f'''<div class="advertisement {status_class}">
+                <h3>{ad.title}</h3>
+                <p>{ad.description}</p>
+                {f'<img src="/static/uploads/{ad.image_filename}" style="max-width: 100%; max-height: 200px; border-radius: 10px; margin: 10px 0;">' if ad.image_filename else ''}
+                {f'<video src="/static/uploads/{ad.video_filename}" controls style="max-width: 100%; max-height: 200px; border-radius: 10px; margin: 10px 0;"></video>' if ad.video_filename else ''}
+                <div style="margin-top: 15px;">
+                    <p><strong>Создатель:</strong> {creator.first_name} {creator.last_name} (@{creator.username})</p>
+                    <p><strong>Статус:</strong> {status_text}</p>
+                    <p><strong>Создано:</strong> {ad.created_at.strftime('%d.%m.%Y %H:%M')}</p>
+                    {f'<p><strong>Примечание администратора:</strong> {ad.admin_notes}</p>' if ad.admin_notes else ''}
+                    {f'<p><strong>Размещение:</strong> {"В ленте" if ad.show_in_feed else ""} {"В боковой панели" if ad.show_on_sidebar else ""}</p>' if ad.status in ['active', 'approved'] else ''}
                 </div>
-                <div class="post-content">{get_emoji_html(post.content)}</div>
-                <div class="post-actions">
-                    <a href="/profile/{author.id}" class="btn btn-small btn-secondary">👤 Профиль автора</a>
-                    <button onclick="confirmBan({author.id}, '{author.username}')" class="btn btn-small btn-danger">🚫 Забанить автора</button>
+                <div style="display: flex; gap: 5px; margin-top: 15px; flex-wrap: wrap;">
+                    <a href="/profile/{creator.id}" class="btn btn-small btn-secondary">👤 Профиль создателя</a>
+                    <a href="/messages/{creator.id}" class="btn btn-small btn-success">💬 Написать</a>
+                    {f'<a href="/admin/approve_ad/{ad.id}" class="btn btn-small btn-success">✅ Одобрить</a>' if ad.status == 'pending' else ''}
+                    {f'<a href="/admin/reject_ad/{ad.id}" class="btn btn-small btn-danger">❌ Отклонить</a>' if ad.status == 'pending' else ''}
+                    {f'<a href="/admin/activate_ad/{ad.id}" class="btn btn-small btn-ad">📢 Активировать</a>' if ad.status == 'approved' else ''}
+                    {f'<a href="/admin/deactivate_ad/{ad.id}" class="btn btn-small btn-warning">⏸️ Деактивировать</a>' if ad.status == 'active' else ''}
                 </div>
             </div>'''
     else:
-        posts_html = '<p style="text-align: center; color: #666; padding: 20px;">Нет постов с жалобами.</p>'
+        ads_html = '<p style="text-align: center; color: #666; padding: 40px;">Рекламные предложения не найдены.</p>'
     
-    messages_html = ""
-    if reported_messages:
-        for msg in reported_messages:
-            sender = User.query.get(msg.sender_id)
-            receiver = User.query.get(msg.receiver_id)
-            messages_html += f'''<div class="message{' hidden' if msg.is_hidden else ''}">
-                <div class="message-header">
-                    <span>От: {sender.first_name} | Кому: {receiver.first_name}</span>
-                    <span>{msg.created_at.strftime('%d.%m.%Y %H:%M')}</span>
-                </div>
-                <div class="message-content">
-                    {get_emoji_html(msg.content)}
-                    <span class="warning-badge">⚠️ {msg.reports_count} жалоб</span>
-                </div>
-                <div style="margin-top: 10px;">
-                    <a href="/profile/{sender.id}" class="btn btn-small btn-secondary">👤 Профиль отправителя</a>
-                    <button onclick="confirmBan({sender.id}, '{sender.username}')" class="btn btn-small btn-danger">🚫 Забанить отправителя</button>
-                </div>
-            </div>'''
-    else:
-        messages_html = '<p style="text-align: center; color: #666; padding: 20px;">Нет сообщений с жалобами.</p>'
-    
-    comments_html = ""
-    if reported_comments:
-        for comment in reported_comments:
-            author = User.query.get(comment.user_id)
-            comments_html += f'''<div class="comment{' hidden' if comment.is_hidden else ''}">
-                <div class="comment-header">
-                    <span>{author.first_name} {author.last_name}</span>
-                    <span>{comment.created_at.strftime('%d.%m.%Y %H:%M')}</span>
-                </div>
-                <div class="comment-content">{get_emoji_html(comment.content)}</div>
-                <div class="comment-actions">
-                    <a href="/profile/{author.id}" class="btn btn-small btn-secondary">👤 Профиль автора</a>
-                    <button onclick="confirmBan({author.id}, '{author.username}')" class="btn btn-small btn-danger">🚫 Забанить автора</button>
-                </div>
-            </div>'''
-    else:
-        comments_html = '<p style="text-align: center; color: #666; padding: 20px;">Нет комментариев с жалобами.</p>'
+    unread_count = get_unread_messages_count(current_user.id)
+    messages_badge = f'<span class="unread-badge">{unread_count}</span>' if unread_count > 0 else ''
     
     content = f'''<div class="nav-menu">
         <a href="/feed" class="nav-btn">📰 Лента</a>
-        <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        <a href="/messages" class="nav-btn">💬 Сообщения{messages_badge}</a>
         <a href="/blocked_users" class="nav-btn">🚫 Заблокированные</a>
         <a href="/users" class="nav-btn">👥 Все пользователи</a>
         <a href="/admin/users" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Пользователи</a>
-        <a href="/admin/admins" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">👑 Администраторы</a>
-        <a href="/admin/reports" class="nav-btn active" style="background: #6f42c1; border-color: #6f42c1;">📊 Жалобы</a>
+        <a href="/admin/reports" class="nav-btn" style="background: #6f42c1; border-color: #6f42c1;">📊 Жалобы</a>
+        <a href="/admin/ads" class="nav-btn active" style="background: #6f42c1; border-color: #6f42c1;">📢 Реклама</a>
         <a href="/logout" class="nav-btn" style="background: #dc3545; border-color: #dc3545;">🚪 Выйти</a>
     </div>
 
     <div class="card">
-        <h2 style="color: #6f42c1; margin-bottom: 20px;">📊 Модерация жалоб</h2>
+        <h2 style="color: #6f42c1; margin-bottom: 25px;">📢 Управление рекламой</h2>
         
-        <h3 style="color: #2a5298; margin: 25px 0 15px 0;">📝 Посты с жалобами</h3>
-        {posts_html}
+        <div style="display: flex; gap: 10px; margin-bottom: 25px;">
+            <a href="/admin/ads?status=all" class="btn {'active' if status_filter == 'all' else 'btn-secondary'}">Все</a>
+            <a href="/admin/ads?status=pending" class="btn {'active' if status_filter == 'pending' else 'btn-secondary'}">⏳ На рассмотрении</a>
+            <a href="/admin/ads?status=approved" class="btn {'active' if status_filter == 'approved' else 'btn-secondary'}">✅ Одобренные</a>
+            <a href="/admin/ads?status=rejected" class="btn {'active' if status_filter == 'rejected' else 'btn-secondary'}">❌ Отклоненные</a>
+            <a href="/admin/ads?status=active" class="btn {'active' if status_filter == 'active' else 'btn-secondary'}">📢 Активные</a>
+        </div>
         
-        <h3 style="color: #2a5298; margin: 25px 0 15px 0;">💬 Сообщения с жалобами</h3>
-        {messages_html}
-        
-        <h3 style="color: #2a5298; margin: 25px 0 15px 0;">💬 Комментарии с жалобами</h3>
-        {comments_html}
+        {ads_html}
     </div>'''
     
-    return render_page('Админ-панель - Жалобы', content)
+    return render_page('Админ-панель - Реклама', content)
+
+@app.route('/admin/approve_ad/<int:ad_id>')
+@login_required
+def admin_approve_ad(ad_id):
+    """Одобрить рекламное предложение"""
+    if not current_user.is_admin:
+        flash('❌ Доступ запрещен. Только для администраторов.', 'error')
+        return redirect('/feed')
+    
+    ad = Advertisement.query.get_or_404(ad_id)
+    
+    if ad.status != 'pending':
+        flash('❌ Это рекламное предложение уже было рассмотрено', 'error')
+        return redirect('/admin/ads')
+    
+    ad.status = 'approved'
+    db.session.commit()
+    
+    flash('✅ Рекламное предложение одобрено', 'success')
+    return redirect('/admin/ads')
+
+@app.route('/admin/reject_ad/<int:ad_id>')
+@login_required
+def admin_reject_ad(ad_id):
+    """Отклонить рекламное предложение"""
+    if not current_user.is_admin:
+        flash('❌ Доступ запрещен. Только для администраторов.', 'error')
+        return redirect('/feed')
+    
+    ad = Advertisement.query.get_or_404(ad_id)
+    
+    if ad.status != 'pending':
+        flash('❌ Это рекламное предложение уже было рассмотрено', 'error')
+        return redirect('/admin/ads')
+    
+    ad.status = 'rejected'
+    db.session.commit()
+    
+    flash('✅ Рекламное предложение отклонено', 'success')
+    return redirect('/admin/ads')
+
+@app.route('/admin/activate_ad/<int:ad_id>')
+@login_required
+def admin_activate_ad(ad_id):
+    """Активировать рекламное предложение"""
+    if not current_user.is_admin:
+        flash('❌ Доступ запрещен. Только для администраторов.', 'error')
+        return redirect('/feed')
+    
+    ad = Advertisement.query.get_or_404(ad_id)
+    
+    if ad.status != 'approved':
+        flash('❌ Сначала нужно одобрить рекламное предложение', 'error')
+        return redirect('/admin/ads')
+    
+    ad.status = 'active'
+    ad.show_in_feed = True
+    ad.show_on_sidebar = True
+    ad.start_date = datetime.utcnow()
+    db.session.commit()
+    
+    flash('✅ Рекламное предложение активировано и размещено в ленте и боковой панели', 'success')
+    return redirect('/admin/ads')
+
+@app.route('/admin/deactivate_ad/<int:ad_id>')
+@login_required
+def admin_deactivate_ad(ad_id):
+    """Деактивировать рекламное предложение"""
+    if not current_user.is_admin:
+        flash('❌ Доступ запрещен. Только для администраторов.', 'error')
+        return redirect('/feed')
+    
+    ad = Advertisement.query.get_or_404(ad_id)
+    
+    if ad.status != 'active':
+        flash('❌ Это рекламное предложение не активно', 'error')
+        return redirect('/admin/ads')
+    
+    ad.status = 'approved'
+    ad.show_in_feed = False
+    ad.show_on_sidebar = False
+    ad.end_date = datetime.utcnow()
+    db.session.commit()
+    
+    flash('✅ Рекламное предложение деактивировано', 'success')
+    return redirect('/admin/ads')
+
+# Остальные административные функции остаются без изменений...
+# [Остальной код остается без изменений, включая функции admin_ban_user, admin_unban_user, admin_delete_user, make_admin, remove_admin, admin_admins, admin_reports]
 
 # ========== ЗАПУСК ПРИЛОЖЕНИЯ ==========
 if __name__ == '__main__':
@@ -2698,6 +3469,12 @@ if __name__ == '__main__':
         print("🌐 Сервер запущен: http://localhost:8321")
         print("🔑 Администратор: зарегистрируйтесь с псевдонимом 'mateugram'")
         print("📧 Email автоматически подтверждается при регистрации")
+        print("🎂 Добавлена поддержка дня рождения")
+        print("📰 Режимы ленты: только подписки или все посты")
+        print("💬 Улучшенная система сообщений с счетчиком непрочитанных")
+        print("👁️ Добавлены просмотры постов и рейтинг")
+        print("📢 Добавлена система рекламы")
+        print("👑 Расширенная админ-панель с полной информацией о пользователях")
     
     port = int(os.environ.get('PORT', 8321))
     app.run(host='0.0.0.0', port=port, debug=True)
