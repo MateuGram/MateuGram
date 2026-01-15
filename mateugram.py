@@ -1,7 +1,7 @@
 """
 MateuGram - Синяя социальная сеть
 Версия с сохранением данных между перезапусками на Render.com
-ИСПРАВЛЕННЫЙ КОД БЕЗ ОШИБОК
+ПОЛНОСТЬЮ ИСПРАВЛЕННЫЙ КОД С ВСЕМ ФУНКЦИОНАЛОМ
 """
 
 import os
@@ -252,7 +252,15 @@ def add_view(post_id, user_id):
         db.session.rollback()
     return False
 
-# ========== HTML ШАБЛОНЫ (упрощенная версия) ==========
+def user_has_liked_post(user_id, post_id):
+    return Like.query.filter_by(user_id=user_id, post_id=post_id).first() is not None
+
+def get_avatar_url(user):
+    if user.avatar_filename and user.avatar_filename != 'default_avatar.png':
+        return f"/static/uploads/{user.avatar_filename}"
+    return None
+
+# ========== HTML ШАБЛОНЫ ==========
 BASE_HTML = '''<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -292,8 +300,14 @@ BASE_HTML = '''<!DOCTYPE html>
         .follow-stat { text-align: center; padding: 10px; background: #f8f9fa; border-radius: 8px; }
         .follow-stat-number { font-size: 1.5em; font-weight: bold; color: #2a5298; }
         .follow-stat-label { font-size: 0.9em; color: #666; }
-        .post-actions { display: flex; gap: 10px; margin-top: 15px; }
+        .post-actions { display: flex; gap: 10px; margin-top: 15px; flex-wrap: wrap; }
         .btn-small { padding: 8px 12px; font-size: 14px; }
+        .comments-section { margin-top: 20px; border-top: 1px solid #eee; padding-top: 15px; }
+        .comment { background: #f8f9fa; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+        .comment-header { display: flex; justify-content: space-between; margin-bottom: 5px; font-size: 0.9em; color: #666; }
+        .media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin: 10px 0; }
+        .media-item { border-radius: 8px; overflow: hidden; }
+        .media-item img, .media-item video { width: 100%; height: 150px; object-fit: cover; }
     </style>
 </head>
 <body>
@@ -335,6 +349,21 @@ BASE_HTML = '''<!DOCTYPE html>
             window.location.href = '/delete_post/' + postId;
         }
     }
+    
+    function confirmDeleteComment(commentId) {
+        if (confirm('Вы уверены, что хотите удалить этот комментарий?')) {
+            window.location.href = '/delete_comment/' + commentId;
+        }
+    }
+    
+    function toggleComments(postId) {
+        const commentsDiv = document.getElementById('comments-' + postId);
+        if (commentsDiv.style.display === 'none') {
+            commentsDiv.style.display = 'block';
+        } else {
+            commentsDiv.style.display = 'none';
+        }
+    }
     </script>
 </body>
 </html>'''
@@ -351,6 +380,7 @@ def render_page(title, content):
             <a href="/profile/{current_user.id}" class="nav-btn">👤 Мой профиль</a>
             <a href="/users" class="nav-btn">👥 Пользователи</a>
             <a href="/messages" class="nav-btn">💬 Сообщения</a>
+            <a href="/create_ad" class="nav-btn">📢 Реклама</a>
         '''
         if current_user.is_admin:
             nav_links += '<a href="/admin" class="nav-btn btn-admin">👑 Админ</a>'
@@ -625,20 +655,37 @@ def feed():
             if post.images:
                 images = json.loads(post.images)
                 if images:
-                    media_html += '<div style="margin: 10px 0;">'
-                    for img in images[:3]:
-                        media_html += f'<img src="/static/uploads/{img}" style="max-width: 200px; max-height: 200px; border-radius: 8px; margin-right: 5px;">'
+                    media_html += '<div class="media-grid">'
+                    for img in images[:4]:
+                        media_html += f'<div class="media-item"><img src="/static/uploads/{img}" alt="Изображение"></div>'
                     media_html += '</div>'
             
             if post.videos:
                 videos = json.loads(post.videos)
                 if videos:
-                    media_html += '<div style="margin: 10px 0;">'
-                    for vid in videos[:1]:
-                        media_html += f'<video src="/static/uploads/{vid}" controls style="max-width: 300px; max-height: 300px; border-radius: 8px;"></video>'
+                    media_html += '<div class="media-grid">'
+                    for vid in videos[:2]:
+                        media_html += f'<div class="media-item"><video src="/static/uploads/{vid}" controls></video></div>'
                     media_html += '</div>'
         except:
             pass
+        
+        # Получаем комментарии для этого поста
+        comments = Comment.query.filter_by(post_id=post.id, is_hidden=False).order_by(Comment.created_at.desc()).limit(3).all()
+        
+        comments_html = ''
+        for comment in comments:
+            comment_author = User.query.get(comment.user_id)
+            comments_html += f'''
+            <div class="comment">
+                <div class="comment-header">
+                    <span>{comment_author.first_name} {comment_author.last_name}</span>
+                    <span>{comment.created_at.strftime('%H:%M')}</span>
+                </div>
+                <div>{get_emoji_html(comment.content)}</div>
+                {f'<div style="margin-top: 5px;"><button onclick="confirmDeleteComment({comment.id})" class="btn btn-small btn-danger">🗑 Удалить</button></div>' if comment.user_id == current_user.id or current_user.is_admin else ''}
+            </div>
+            '''
         
         posts_html += f'''
         <div class="post">
@@ -659,12 +706,27 @@ def feed():
             {media_html}
             
             <div class="post-actions">
-                <span class="btn btn-small">❤️ {get_like_count(post.id)}</span>
-                <span class="btn btn-small">💬 {get_comment_count(post.id)}</span>
+                <a href="/like_post/{post.id}" class="btn btn-small {'btn-danger' if user_has_liked_post(current_user.id, post.id) else ''}">❤️ {get_like_count(post.id)}</a>
+                <button onclick="toggleComments({post.id})" class="btn btn-small">💬 {get_comment_count(post.id)}</button>
                 <span class="btn btn-small">👁️ {post.views_count}</span>
                 <a href="/profile/{author.id}" class="btn btn-small">👤 Профиль</a>
+                <a href="/report_post/{post.id}" class="btn btn-small btn-warning">🚫 Пожаловаться</a>
                 {f'<a href="/follow/{author.id}" class="btn btn-small btn-success">➕ Подписаться</a>' if not is_following(current_user.id, author.id) and author.id != current_user.id else ''}
                 {f'<button onclick="confirmDeletePost({post.id})" class="btn btn-small btn-danger">🗑 Удалить</button>' if post.user_id == current_user.id or current_user.is_admin else ''}
+            </div>
+            
+            <!-- Форма для комментария -->
+            <div style="margin-top: 15px;">
+                <form method="POST" action="/add_comment/{post.id}" style="display: flex; gap: 10px;">
+                    <input type="text" name="content" class="form-input" placeholder="Добавить комментарий..." required style="flex-grow: 1;">
+                    <button type="submit" class="btn btn-small">Отправить</button>
+                </form>
+            </div>
+            
+            <!-- Секция комментариев -->
+            <div id="comments-{post.id}" style="display: none;" class="comments-section">
+                <h4 style="color: #2a5298; margin-bottom: 10px;">Комментарии:</h4>
+                {comments_html if comments_html else '<p style="color: #666; text-align: center;">Комментариев пока нет.</p>'}
             </div>
         </div>
         '''
@@ -807,6 +869,94 @@ def delete_post(post_id):
     flash('✅ Пост удален', 'success')
     return redirect('/feed')
 
+@app.route('/like_post/<int:post_id>')
+@login_required
+def like_post(post_id):
+    post = Post.query.get_or_404(post_id)
+    
+    if user_has_liked_post(current_user.id, post_id):
+        # Удаляем лайк
+        like = Like.query.filter_by(user_id=current_user.id, post_id=post_id).first()
+        if like:
+            db.session.delete(like)
+            db.session.commit()
+            flash('💔 Вы убрали лайк', 'info')
+    else:
+        # Добавляем лайк
+        like = Like(user_id=current_user.id, post_id=post_id)
+        db.session.add(like)
+        db.session.commit()
+        flash('❤️ Вы поставили лайк', 'success')
+    
+    return redirect('/feed')
+
+@app.route('/add_comment/<int:post_id>', methods=['POST'])
+@login_required
+def add_comment(post_id):
+    post = Post.query.get_or_404(post_id)
+    
+    content = request.form['content']
+    if not content.strip():
+        flash('❌ Комментарий не может быть пустым', 'error')
+        return redirect('/feed')
+    
+    comment = Comment(
+        content=content,
+        user_id=current_user.id,
+        post_id=post_id
+    )
+    
+    db.session.add(comment)
+    db.session.commit()
+    
+    flash('✅ Комментарий добавлен', 'success')
+    return redirect('/feed')
+
+@app.route('/delete_comment/<int:comment_id>')
+@login_required
+def delete_comment(comment_id):
+    comment = Comment.query.get_or_404(comment_id)
+    
+    if comment.user_id != current_user.id and not current_user.is_admin:
+        flash('❌ Вы не можете удалить этот комментарий', 'error')
+        return redirect('/feed')
+    
+    db.session.delete(comment)
+    db.session.commit()
+    
+    flash('✅ Комментарий удален', 'success')
+    return redirect('/feed')
+
+@app.route('/report_post/<int:post_id>')
+@login_required
+def report_post(post_id):
+    post = Post.query.get_or_404(post_id)
+    
+    if post.user_id == current_user.id:
+        flash('❌ Нельзя пожаловаться на свой собственный пост', 'error')
+        return redirect('/feed')
+    
+    post.reports_count += 1
+    db.session.commit()
+    
+    flash('✅ Жалоба отправлена администраторам', 'success')
+    return redirect('/feed')
+
+@app.route('/report_message/<int:message_id>')
+@login_required
+def report_message(message_id):
+    message = Message.query.get_or_404(message_id)
+    
+    if message.sender_id == current_user.id:
+        flash('❌ Нельзя пожаловаться на свое собственное сообщение', 'error')
+        return redirect(f'/messages/{message.receiver_id if message.sender_id == current_user.id else message.sender_id}')
+    
+    message.reports_count += 1
+    db.session.commit()
+    
+    flash('✅ Жалоба на сообщение отправлена администраторам', 'success')
+    return redirect(f'/messages/{message.receiver_id if message.sender_id == current_user.id else message.sender_id}')
+
 # ========== ПРОФИЛЬ ==========
 @app.route('/profile/<int:user_id>')
 @login_required
@@ -826,8 +976,16 @@ def profile(user_id):
     user_posts = Post.query.filter_by(user_id=user_id, is_hidden=False).order_by(Post.created_at.desc()).all()
     is_following_user = is_following(current_user.id, user_id)
     
+    # Отображаем аватар
+    avatar_html = ''
+    avatar_url = get_avatar_url(user)
+    if avatar_url:
+        avatar_html = f'<img src="{avatar_url}" style="width: 100px; height: 100px; border-radius: 50%; object-fit: cover;">'
+    else:
+        avatar_html = f'<div class="avatar" style="width: 100px; height: 100px; font-size: 2em;">{user.first_name[0]}{user.last_name[0]}</div>'
+    
     posts_html = ''
-    for post in user_posts:
+    for post in user_posts[:5]:  # Показываем только 5 последних постов
         posts_html += f'''
         <div class="post">
             <div style="color: #888; text-align: right; font-size: 0.9em;">{post.created_at.strftime('%d.%m.%Y %H:%M')}</div>
@@ -863,6 +1021,11 @@ def profile(user_id):
                 <a href="/follow/{user_id}" class="btn btn-success">➕ Подписаться</a>
                 <a href="/messages/{user_id}" class="btn">💬 Написать</a>
                 '''
+            # Кнопка блокировки
+            if not is_user_blocked(current_user.id, user_id):
+                action_buttons += f'<a href="/block_user/{user_id}" class="btn btn-danger">🚫 Заблокировать</a>'
+            else:
+                action_buttons += f'<a href="/unblock_user/{user_id}" class="btn btn-success">✅ Разблокировать</a>'
     
     # Бейджи
     badges = ''
@@ -874,8 +1037,8 @@ def profile(user_id):
     return render_page(f'Профиль {user.username}', f'''
     <div class="card">
         <div style="display: flex; align-items: center; gap: 25px; margin-bottom: 25px;">
-            <div class="avatar" style="width: 100px; height: 100px; font-size: 2em;">
-                {user.first_name[0]}{user.last_name[0]}
+            <div>
+                {avatar_html}
             </div>
             <div style="flex-grow: 1;">
                 <h2 style="color: #2a5298; margin-bottom: 5px;">
@@ -902,7 +1065,7 @@ def profile(user_id):
                     </div>
                 </div>
                 
-                <div style="margin-top: 20px; display: flex; gap: 10px;">
+                <div style="margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
                     {action_buttons}
                     <a href="/users" class="btn">← Назад</a>
                 </div>
@@ -912,7 +1075,7 @@ def profile(user_id):
         {f'<div class="card" style="margin-top: 20px;"><h3 style="color: #2a5298; margin-bottom: 15px;">📝 О себе</h3><p style="line-height: 1.6;">{get_emoji_html(user.bio) if user.bio else "Пользователь не добавил информацию о себе."}</p></div>' if user.bio else ''}
         
         <div style="margin-top: 30px;">
-            <h3 style="color: #2a5298; margin-bottom: 15px;">📰 Посты пользователя</h3>
+            <h3 style="color: #2a5298; margin-bottom: 15px;">📰 Последние посты</h3>
             {posts_html}
         </div>
     </div>
@@ -948,12 +1111,26 @@ def edit_profile():
             if file.filename:
                 saved_name = save_file(file, 'image')
                 if saved_name:
+                    # Удаляем старый аватар, если он не стандартный
+                    if current_user.avatar_filename and current_user.avatar_filename != 'default_avatar.png':
+                        old_path = os.path.join(app.config['UPLOAD_FOLDER'], current_user.avatar_filename)
+                        if os.path.exists(old_path):
+                            os.remove(old_path)
+                    
                     current_user.avatar_filename = saved_name
                     flash('✅ Аватар обновлен', 'success')
         
         db.session.commit()
         flash('✅ Профиль успешно обновлен', 'success')
         return redirect(f'/profile/{current_user.id}')
+    
+    # Отображаем текущий аватар
+    avatar_html = ''
+    avatar_url = get_avatar_url(current_user)
+    if avatar_url:
+        avatar_html = f'<img src="{avatar_url}" style="width: 80px; height: 80px; border-radius: 50%; object-fit: cover;">'
+    else:
+        avatar_html = f'<div class="avatar" style="width: 80px; height: 80px; font-size: 1.5em;">{current_user.first_name[0]}{current_user.last_name[0]}</div>'
     
     birthday_str = current_user.birthday.strftime('%Y-%m-%d') if current_user.birthday else ''
     
@@ -964,14 +1141,12 @@ def edit_profile():
         <form method="POST" enctype="multipart/form-data">
             <div style="display: flex; align-items: center; gap: 20px; margin-bottom: 30px;">
                 <div>
-                    <div class="avatar" style="width: 80px; height: 80px; font-size: 1.5em;">
-                        {current_user.first_name[0]}{current_user.last_name[0]}
-                    </div>
+                    {avatar_html}
                 </div>
                 <div>
                     <label style="display: block; margin-bottom: 8px; font-weight: 600;">🖼️ Аватар</label>
                     <input type="file" name="avatar" accept="image/*">
-                    <small style="color: #666;">Максимальный размер: 2MB</small>
+                    <small style="color: #666;">Максимальный размер: 5MB</small>
                 </div>
             </div>
             
@@ -1020,6 +1195,44 @@ def edit_profile():
     </div>
     ''')
 
+@app.route('/block_user/<int:user_id>')
+@login_required
+def block_user(user_id):
+    if user_id == current_user.id:
+        flash('❌ Нельзя заблокировать самого себя', 'error')
+        return redirect(f'/profile/{user_id}')
+    
+    if is_user_blocked(current_user.id, user_id):
+        flash('❌ Вы уже заблокировали этого пользователя', 'error')
+        return redirect(f'/profile/{user_id}')
+    
+    blocked = BlockedUser(blocker_id=current_user.id, blocked_id=user_id)
+    db.session.add(blocked)
+    db.session.commit()
+    
+    user = User.query.get(user_id)
+    flash(f'✅ Вы заблокировали {user.first_name} {user.last_name}', 'success')
+    return redirect(f'/profile/{user_id}')
+
+@app.route('/unblock_user/<int:user_id>')
+@login_required
+def unblock_user(user_id):
+    if user_id == current_user.id:
+        flash('❌ Нельзя разблокировать самого себя', 'error')
+        return redirect(f'/profile/{user_id}')
+    
+    blocked = BlockedUser.query.filter_by(blocker_id=current_user.id, blocked_id=user_id).first()
+    if not blocked:
+        flash('❌ Вы не блокировали этого пользователя', 'error')
+        return redirect(f'/profile/{user_id}')
+    
+    db.session.delete(blocked)
+    db.session.commit()
+    
+    user = User.query.get(user_id)
+    flash(f'✅ Вы разблокировали {user.first_name} {user.last_name}', 'success')
+    return redirect(f'/profile/{user_id}')
+
 # ========== ПОЛЬЗОВАТЕЛИ ==========
 @app.route('/users')
 @login_required
@@ -1044,10 +1257,18 @@ def users():
         posts_count = Post.query.filter_by(user_id=user.id).count()
         is_following_user = is_following(current_user.id, user.id)
         
+        # Аватар пользователя
+        avatar_html = ''
+        avatar_url = get_avatar_url(user)
+        if avatar_url:
+            avatar_html = f'<img src="{avatar_url}" style="width: 50px; height: 50px; border-radius: 50%; object-fit: cover;">'
+        else:
+            avatar_html = f'<div class="avatar">{user.first_name[0]}{user.last_name[0]}</div>'
+        
         users_html += f'''
         <div class="user-card">
             <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 10px;">
-                <div class="avatar">{user.first_name[0]}{user.last_name[0]}</div>
+                {avatar_html}
                 <div style="flex-grow: 1;">
                     <div style="font-weight: bold; color: #2a5298;">
                         {user.first_name} {user.last_name}
@@ -1059,7 +1280,7 @@ def users():
             <div style="color: #666; font-size: 0.9em; margin-bottom: 10px;">
                 📝 {posts_count} постов • 👥 {get_followers_count(user.id)} подписчиков
             </div>
-            <div style="display: flex; gap: 5px;">
+            <div style="display: flex; gap: 5px; flex-wrap: wrap;">
                 <a href="/profile/{user.id}" class="btn btn-small">👤 Профиль</a>
                 <a href="/messages/{user.id}" class="btn btn-small btn-success">💬 Написать</a>
                 {f'<a href="/unfollow/{user.id}" class="btn btn-small btn-danger">❌ Отписаться</a>' if is_following_user else f'<a href="/follow/{user.id}" class="btn btn-small btn-success">➕ Подписаться</a>'}
@@ -1135,12 +1356,69 @@ def unfollow(user_id):
 def messages_list():
     unread_count = get_unread_messages_count(current_user.id)
     
+    # Получаем последние диалоги
+    sent_messages = Message.query.filter_by(sender_id=current_user.id).order_by(Message.created_at.desc()).all()
+    received_messages = Message.query.filter_by(receiver_id=current_user.id).order_by(Message.created_at.desc()).all()
+    
+    # Собираем уникальных собеседников
+    interlocutors = {}
+    for msg in sent_messages + received_messages:
+        other_id = msg.receiver_id if msg.sender_id == current_user.id else msg.sender_id
+        if other_id not in interlocutors:
+            user = User.query.get(other_id)
+            if user:
+                interlocutors[other_id] = {
+                    'user': user,
+                    'last_message': msg,
+                    'unread': msg.receiver_id == current_user.id and not msg.is_read
+                }
+    
+    dialogues_html = ''
+    for other_id, data in list(interlocutors.items())[:10]:  # Показываем 10 последних диалогов
+        user = data['user']
+        last_msg = data['last_message']
+        unread = data['unread']
+        
+        avatar_html = ''
+        avatar_url = get_avatar_url(user)
+        if avatar_url:
+            avatar_html = f'<img src="{avatar_url}" style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover;">'
+        else:
+            avatar_html = f'<div class="avatar" style="width: 40px; height: 40px; font-size: 0.8em;">{user.first_name[0]}{user.last_name[0]}</div>'
+        
+        dialogues_html += f'''
+        <div style="background: {'#e3f2fd' if unread else 'white'}; border-radius: 10px; padding: 15px; margin-bottom: 10px; display: flex; align-items: center; gap: 15px;">
+            {avatar_html}
+            <div style="flex-grow: 1;">
+                <div style="font-weight: {'bold' if unread else 'normal'}; color: #2a5298;">
+                    {user.first_name} {user.last_name}
+                    {f'<span style="background: #dc3545; color: white; padding: 2px 6px; border-radius: 10px; font-size: 0.8em; margin-left: 5px;">Новое</span>' if unread else ''}
+                </div>
+                <div style="color: #666; font-size: 0.9em;">
+                    {last_msg.content[:50]}{'...' if len(last_msg.content) > 50 else ''}
+                </div>
+            </div>
+            <div>
+                <a href="/messages/{user.id}" class="btn btn-small">💬 Открыть</a>
+            </div>
+        </div>
+        '''
+    
+    if not dialogues_html:
+        dialogues_html = '<p style="text-align: center; color: #666; padding: 20px;">У вас пока нет диалогов.</p>'
+    
     return render_page('Сообщения', f'''
     <div class="card">
         <h2 style="color: #2a5298; margin-bottom: 25px;">💬 Сообщения</h2>
         <p style="margin-bottom: 20px; color: #666;">
             {f'У вас {unread_count} непрочитанных сообщений' if unread_count > 0 else 'Нет непрочитанных сообщений'}
         </p>
+        
+        <div style="margin-bottom: 20px;">
+            <h3 style="color: #2a5298; margin-bottom: 15px;">📨 Последние диалоги</h3>
+            {dialogues_html}
+        </div>
+        
         <div style="text-align: center; margin-top: 20px;">
             <a href="/users" class="btn">👥 Найти пользователей для общения</a>
         </div>
@@ -1205,15 +1483,32 @@ def messages(receiver_id):
                 <span>{msg.created_at.strftime('%H:%M')}</span>
             </div>
             <div style="line-height: 1.5;">{get_emoji_html(msg.content)}</div>
+            <div style="margin-top: 10px; display: flex; gap: 5px;">
+                {f'<a href="/report_message/{msg.id}" class="btn btn-small btn-warning">🚫 Пожаловаться</a>' if msg.sender_id != current_user.id else ''}
+            </div>
         </div>
         '''
     
     if not messages_html:
         messages_html = '<p style="text-align: center; color: #666; padding: 20px;">Нет сообщений. Начните диалог!</p>'
     
+    # Аватар получателя
+    receiver_avatar = ''
+    receiver_avatar_url = get_avatar_url(receiver)
+    if receiver_avatar_url:
+        receiver_avatar = f'<img src="{receiver_avatar_url}" style="width: 50px; height: 50px; border-radius: 50%; object-fit: cover; margin-right: 15px;">'
+    else:
+        receiver_avatar = f'<div class="avatar" style="margin-right: 15px;">{receiver.first_name[0]}{receiver.last_name[0]}</div>'
+    
     return render_page(f'Диалог с {receiver.username}', f'''
     <div class="card">
-        <h2 style="color: #2a5298; margin-bottom: 25px;">💬 Диалог с {receiver.first_name} {receiver.last_name}</h2>
+        <div style="display: flex; align-items: center; margin-bottom: 25px;">
+            {receiver_avatar}
+            <div>
+                <h2 style="color: #2a5298; margin-bottom: 5px;">💬 Диалог с {receiver.first_name} {receiver.last_name}</h2>
+                <p>@{receiver.username}</p>
+            </div>
+        </div>
         
         <div style="max-height: 400px; overflow-y: auto; margin-bottom: 20px;">
             {messages_html}
@@ -1224,8 +1519,97 @@ def messages(receiver_id):
                 <textarea name="content" class="form-input" rows="3" placeholder="Введите сообщение..." required></textarea>
             </div>
             
-            <button type="submit" class="btn">📤 Отправить</button>
-            <a href="/messages" class="btn" style="margin-left: 10px;">← Назад</a>
+            <div style="display: flex; gap: 10px;">
+                <button type="submit" class="btn">📤 Отправить</button>
+                <a href="/messages" class="btn">← Назад к диалогам</a>
+            </div>
+        </form>
+    </div>
+    ''')
+
+# ========== РЕКЛАМА ==========
+@app.route('/create_ad', methods=['GET', 'POST'])
+@login_required
+def create_ad():
+    if request.method == 'POST':
+        title = request.form['title']
+        description = request.form['description']
+        
+        if not title.strip() or not description.strip():
+            flash('❌ Заполните все обязательные поля', 'error')
+            return redirect('/create_ad')
+        
+        image_filename = None
+        video_filename = None
+        
+        if 'image' in request.files:
+            file = request.files['image']
+            if file.filename:
+                saved_name = save_file(file, 'image')
+                if saved_name:
+                    image_filename = saved_name
+        
+        if 'video' in request.files:
+            file = request.files['video']
+            if file.filename:
+                saved_name = save_file(file, 'video')
+                if saved_name:
+                    video_filename = saved_name
+        
+        ad = Advertisement(
+            user_id=current_user.id,
+            title=title,
+            description=description,
+            image_filename=image_filename,
+            video_filename=video_filename,
+            status='pending'
+        )
+        
+        db.session.add(ad)
+        db.session.commit()
+        
+        flash('✅ Рекламное предложение отправлено на модерацию', 'success')
+        return redirect('/feed')
+    
+    return render_page('Создать рекламу', '''
+    <div class="card">
+        <h2 style="color: #2a5298; margin-bottom: 25px;">📢 Создать рекламное предложение</h2>
+        
+        <form method="POST" enctype="multipart/form-data">
+            <div class="form-group">
+                <label style="display: block; margin-bottom: 8px; font-weight: 600;">📝 Заголовок</label>
+                <input type="text" name="title" class="form-input" placeholder="Заголовок вашей рекламы" required>
+            </div>
+            
+            <div class="form-group">
+                <label style="display: block; margin-bottom: 8px; font-weight: 600;">📄 Описание</label>
+                <textarea name="description" class="form-input" rows="5" placeholder="Подробное описание вашего предложения..." required></textarea>
+            </div>
+            
+            <div class="form-group">
+                <label style="display: block; margin-bottom: 8px; font-weight: 600;">🖼️ Изображение (опционально)</label>
+                <input type="file" name="image" accept="image/*">
+                <small style="color: #666;">PNG, JPG, JPEG, GIF</small>
+            </div>
+            
+            <div class="form-group">
+                <label style="display: block; margin-bottom: 8px; font-weight: 600;">🎬 Видео (опционально)</label>
+                <input type="file" name="video" accept="video/*">
+                <small style="color: #666;">MP4, MOV, AVI, MKV</small>
+            </div>
+            
+            <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                <h4 style="color: #2a5298; margin-bottom: 10px;">📋 Правила размещения рекламы:</h4>
+                <ul style="list-style: none; padding: 0; color: #666;">
+                    <li>✅ Реклама не должна содержать запрещенный контент</li>
+                    <li>✅ Запрещена политическая и религиозная реклама</li>
+                    <li>✅ Все предложения проходят модерацию</li>
+                    <li>✅ Срок рассмотрения: 1-3 рабочих дня</li>
+                </ul>
+            </div>
+            
+            <button type="submit" class="btn">📤 Отправить на модерацию</button>
+            <a href="/feed" class="btn btn-danger" style="margin-left: 10px;">❌ Отмена</a>
         </form>
     </div>
     ''')
@@ -1243,6 +1627,7 @@ def admin():
     banned_users = User.query.filter_by(is_banned=True).count()
     total_posts = Post.query.count()
     total_messages = Message.query.count()
+    pending_ads = Advertisement.query.filter_by(status='pending').count()
     
     return render_page('Админ-панель', f'''
     <div class="card">
@@ -1265,12 +1650,16 @@ def admin():
                 <h3 style="color: #856404;">{total_posts}</h3>
                 <p>Всего постов</p>
             </div>
+            <div style="background: #d1ecf1; padding: 15px; border-radius: 10px; text-align: center;">
+                <h3 style="color: #0c5460;">{pending_ads}</h3>
+                <p>Ожидающих реклам</p>
+            </div>
         </div>
         
         <div style="display: flex; flex-direction: column; gap: 10px;">
             <a href="/admin/users" class="btn btn-admin">👥 Управление пользователями</a>
             <a href="/admin/reports" class="btn btn-admin">📊 Жалобы</a>
-            <a href="/admin/ads" class="btn btn-admin">📢 Реклама</a>
+            <a href="/admin/ads" class="btn btn-admin">📢 Модерация рекламы</a>
             <a href="/feed" class="btn">← Назад в ленту</a>
         </div>
     </div>
@@ -1301,10 +1690,18 @@ def admin_users():
         following_count = get_following_count(user.id)
         followers_count = get_followers_count(user.id)
         
+        # Аватар пользователя
+        avatar_html = ''
+        avatar_url = get_avatar_url(user)
+        if avatar_url:
+            avatar_html = f'<img src="{avatar_url}" style="width: 50px; height: 50px; border-radius: 50%; object-fit: cover;">'
+        else:
+            avatar_html = f'<div class="avatar">{user.first_name[0]}{user.last_name[0]}</div>'
+        
         users_html += f'''
         <div class="card" style="margin-bottom: 15px; position: relative;">
             <div style="display: flex; align-items: center; gap: 15px;">
-                <div class="avatar">{user.first_name[0]}{user.last_name[0]}</div>
+                {avatar_html}
                 <div style="flex-grow: 1;">
                     <div style="font-weight: bold; color: #2a5298;">
                         {user.first_name} {user.last_name}
@@ -1410,6 +1807,12 @@ def admin_delete_user(user_id):
     user = User.query.get_or_404(user_id)
     
     try:
+        # Удаляем аватар пользователя
+        if user.avatar_filename and user.avatar_filename != 'default_avatar.png':
+            avatar_path = os.path.join(app.config['UPLOAD_FOLDER'], user.avatar_filename)
+            if os.path.exists(avatar_path):
+                os.remove(avatar_path)
+        
         db.session.delete(user)
         db.session.commit()
         flash(f'✅ Аккаунт пользователя {user.username} удален', 'success')
@@ -1470,10 +1873,11 @@ def admin_reports():
     
     posts_with_reports = Post.query.filter(Post.reports_count > 0).all()
     comments_with_reports = Comment.query.filter(Comment.reports_count > 0).all()
+    messages_with_reports = Message.query.filter(Message.reports_count > 0).all()
     
     reports_html = ''
     
-    if not posts_with_reports and not comments_with_reports:
+    if not posts_with_reports and not comments_with_reports and not messages_with_reports:
         reports_html = '<p style="text-align: center; color: #666; padding: 40px;">Жалоб пока нет.</p>'
     else:
         for post in posts_with_reports:
@@ -1486,8 +1890,9 @@ def admin_reports():
                 <p><strong>Количество жалоб:</strong> {post.reports_count}</p>
                 <p><strong>Статус:</strong> {'🚫 Скрыт' if post.is_hidden else '👁 Видим'}</p>
                 <div style="display: flex; gap: 5px; margin-top: 10px;">
-                    <a href="/feed" class="btn btn-small">👁 Просмотреть</a>
+                    <a href="/feed" class="btn btn-small">👁 Просмотреть пост</a>
                     <a href="/admin/delete_user/{author.id}" class="btn btn-small btn-danger">🚫 Забанить автора</a>
+                    <a href="/admin/hide_post/{post.id}" class="btn btn-small btn-warning">👁 Скрыть пост</a>
                 </div>
             </div>
             '''
@@ -1496,7 +1901,7 @@ def admin_reports():
     <div class="card">
         <h2 style="color: #6f42c1; margin-bottom: 25px;">📊 Управление жалобами</h2>
         
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 25px;">
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; margin-bottom: 25px;">
             <div style="background: #f8d7da; padding: 15px; border-radius: 10px; text-align: center;">
                 <h3 style="color: #dc3545;">{len(posts_with_reports)}</h3>
                 <p>Жалоб на посты</p>
@@ -1504,6 +1909,10 @@ def admin_reports():
             <div style="background: #fff3cd; padding: 15px; border-radius: 10px; text-align: center;">
                 <h3 style="color: #856404;">{len(comments_with_reports)}</h3>
                 <p>Жалоб на комментарии</p>
+            </div>
+            <div style="background: #d1ecf1; padding: 15px; border-radius: 10px; text-align: center;">
+                <h3 style="color: #0c5460;">{len(messages_with_reports)}</h3>
+                <p>Жалоб на сообщения</p>
             </div>
         </div>
         
@@ -1515,6 +1924,20 @@ def admin_reports():
     </div>
     ''')
 
+@app.route('/admin/hide_post/<int:post_id>')
+@login_required
+def admin_hide_post(post_id):
+    if not current_user.is_admin:
+        flash('❌ Доступ запрещен', 'error')
+        return redirect('/feed')
+    
+    post = Post.query.get_or_404(post_id)
+    post.is_hidden = True
+    db.session.commit()
+    
+    flash('✅ Пост скрыт от пользователей', 'success')
+    return redirect('/admin/reports')
+
 @app.route('/admin/ads')
 @login_required
 def admin_ads():
@@ -1522,15 +1945,89 @@ def admin_ads():
         flash('❌ Доступ запрещен', 'error')
         return redirect('/feed')
     
-    return render_page('Админ - Реклама', '''
+    pending_ads = Advertisement.query.filter_by(status='pending').all()
+    approved_ads = Advertisement.query.filter_by(status='approved').all()
+    rejected_ads = Advertisement.query.filter_by(status='rejected').all()
+    
+    ads_html = ''
+    
+    if pending_ads:
+        ads_html += '<h3 style="color: #856404; margin-top: 20px;">⏳ Ожидающие модерации</h3>'
+        for ad in pending_ads:
+            creator = User.query.get(ad.user_id)
+            ads_html += f'''
+            <div class="card" style="margin-bottom: 15px; border-left: 5px solid #ffc107;">
+                <h4>{ad.title}</h4>
+                <p><strong>Создатель:</strong> {creator.first_name} {creator.last_name} (@{creator.username})</p>
+                <p><strong>Описание:</strong> {ad.description[:200]}{'...' if len(ad.description) > 200 else ''}</p>
+                <p><strong>Дата создания:</strong> {ad.created_at.strftime('%d.%m.%Y %H:%M')}</p>
+                
+                {f'<p><strong>Изображение:</strong> <img src="/static/uploads/{ad.image_filename}" style="max-width: 200px; max-height: 200px; border-radius: 8px;"></p>' if ad.image_filename else ''}
+                
+                <div style="display: flex; gap: 5px; margin-top: 10px;">
+                    <a href="/admin/approve_ad/{ad.id}" class="btn btn-small btn-success">✅ Одобрить</a>
+                    <a href="/admin/reject_ad/{ad.id}" class="btn btn-small btn-danger">❌ Отклонить</a>
+                </div>
+            </div>
+            '''
+    
+    if not ads_html:
+        ads_html = '<p style="text-align: center; color: #666; padding: 40px;">Нет рекламных предложений для модерации.</p>'
+    
+    return render_page('Админ - Реклама', f'''
     <div class="card">
-        <h2 style="color: #6f42c1; margin-bottom: 25px;">📢 Управление рекламой</h2>
-        <p style="text-align: center; color: #666; padding: 40px;">Система рекламы будет добавлена в следующем обновлении.</p>
-        <div style="text-align: center;">
+        <h2 style="color: #6f42c1; margin-bottom: 25px;">📢 Модерация рекламных предложений</h2>
+        
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; margin-bottom: 25px;">
+            <div style="background: #fff3cd; padding: 15px; border-radius: 10px; text-align: center;">
+                <h3 style="color: #856404;">{len(pending_ads)}</h3>
+                <p>Ожидают модерации</p>
+            </div>
+            <div style="background: #d4edda; padding: 15px; border-radius: 10px; text-align: center;">
+                <h3 style="color: #28a745;">{len(approved_ads)}</h3>
+                <p>Одобрено</p>
+            </div>
+            <div style="background: #f8d7da; padding: 15px; border-radius: 10px; text-align: center;">
+                <h3 style="color: #dc3545;">{len(rejected_ads)}</h3>
+                <p>Отклонено</p>
+            </div>
+        </div>
+        
+        {ads_html}
+        
+        <div style="margin-top: 20px;">
             <a href="/admin" class="btn">← Назад в админ-панель</a>
         </div>
     </div>
     ''')
+
+@app.route('/admin/approve_ad/<int:ad_id>')
+@login_required
+def admin_approve_ad(ad_id):
+    if not current_user.is_admin:
+        flash('❌ Доступ запрещен', 'error')
+        return redirect('/feed')
+    
+    ad = Advertisement.query.get_or_404(ad_id)
+    ad.status = 'approved'
+    db.session.commit()
+    
+    flash('✅ Рекламное предложение одобрено', 'success')
+    return redirect('/admin/ads')
+
+@app.route('/admin/reject_ad/<int:ad_id>')
+@login_required
+def admin_reject_ad(ad_id):
+    if not current_user.is_admin:
+        flash('❌ Доступ запрещен', 'error')
+        return redirect('/feed')
+    
+    ad = Advertisement.query.get_or_404(ad_id)
+    ad.status = 'rejected'
+    db.session.commit()
+    
+    flash('✅ Рекламное предложение отклонено', 'success')
+    return redirect('/admin/ads')
 
 # ========== СЛУЖЕБНЫЕ МАРШРУТЫ ==========
 @app.route('/health')
