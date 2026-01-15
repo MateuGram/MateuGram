@@ -1,7 +1,7 @@
 """
 MateuGram - Синяя социальная сеть
 Версия с сохранением данных между перезапусками на Render.com
-ПОЛНЫЙ ИСПРАВЛЕННЫЙ КОД С ПРАВИЛЬНЫМ ПОРТОМ
+ИСПРАВЛЕННЫЙ КОД БЕЗ ОШИБОК
 """
 
 import os
@@ -9,7 +9,7 @@ import json
 import atexit
 import threading
 from datetime import datetime
-from flask import Flask, render_template_string, request, redirect, url_for, flash, get_flashed_messages
+from flask import Flask, request, redirect, url_for, flash, get_flashed_messages
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -165,7 +165,7 @@ class Advertisement(db.Model):
     start_date = db.Column(db.DateTime, nullable=True)
     end_date = db.Column(db.DateTime, nullable=True)
 
-# ========== ГЛАВНОЕ ИСПРАВЛЕНИЕ: ФУНКЦИЯ load_user ==========
+# ========== ФУНКЦИЯ load_user ==========
 @login_manager.user_loader
 def load_user(user_id):
     """ВАЖНО: Не фильтровать по is_banned и is_active здесь!"""
@@ -305,33 +305,12 @@ BASE_HTML = '''<!DOCTYPE html>
         
         <div class="nav">
             <a href="/" class="nav-btn">🏠 Главная</a>
-            {% if current_user.is_authenticated %}
-                <a href="/feed" class="nav-btn">📰 Лента</a>
-                <a href="/create_post" class="nav-btn">📝 Создать пост</a>
-                <a href="/profile/{{ current_user.id }}" class="nav-btn">👤 Мой профиль</a>
-                <a href="/users" class="nav-btn">👥 Пользователи</a>
-                <a href="/messages" class="nav-btn">💬 Сообщения</a>
-                {% if current_user.is_admin %}
-                    <a href="/admin" class="nav-btn btn-admin">👑 Админ</a>
-                {% endif %}
-                <a href="/logout" class="nav-btn btn-danger">🚪 Выйти</a>
-            {% else %}
-                <a href="/login" class="nav-btn">🔑 Вход</a>
-                <a href="/register" class="nav-btn">📝 Регистрация</a>
-            {% endif %}
+            {nav_links}
         </div>
         
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                {% for category, message in messages %}
-                    <div class="alert alert-{{ 'success' if category == 'success' else 'error' if category == 'error' else 'info' }}">
-                        {{ message }}
-                    </div>
-                {% endfor %}
-            {% endif %}
-        {% endwith %}
+        {flash_messages}
         
-        {% block content %}{% endblock %}
+        {content}
     </div>
     
     <script>
@@ -361,7 +340,46 @@ BASE_HTML = '''<!DOCTYPE html>
 </html>'''
 
 def render_page(title, content):
-    return render_template_string(BASE_HTML.format(title=title), content=content)
+    """Рендерит страницу с заданным заголовком и содержимым"""
+    
+    # Генерируем навигационные ссылки
+    nav_links = ''
+    if current_user.is_authenticated:
+        nav_links = f'''
+            <a href="/feed" class="nav-btn">📰 Лента</a>
+            <a href="/create_post" class="nav-btn">📝 Создать пост</a>
+            <a href="/profile/{current_user.id}" class="nav-btn">👤 Мой профиль</a>
+            <a href="/users" class="nav-btn">👥 Пользователи</a>
+            <a href="/messages" class="nav-btn">💬 Сообщения</a>
+        '''
+        if current_user.is_admin:
+            nav_links += '<a href="/admin" class="nav-btn btn-admin">👑 Админ</a>'
+        nav_links += '<a href="/logout" class="nav-btn btn-danger">🚪 Выйти</a>'
+    else:
+        nav_links = '''
+            <a href="/login" class="nav-btn">🔑 Вход</a>
+            <a href="/register" class="nav-btn">📝 Регистрация</a>
+        '''
+    
+    # Генерируем flash сообщения
+    flash_messages = ''
+    messages = get_flashed_messages(with_categories=True)
+    for category, message in messages:
+        if category == 'success':
+            flash_class = 'alert-success'
+        elif category == 'error' or category == 'danger':
+            flash_class = 'alert-error'
+        else:
+            flash_class = 'alert-info'
+        flash_messages += f'<div class="alert {flash_class}">{message}</div>'
+    
+    # Собираем HTML
+    html = BASE_HTML.replace('{title}', title)
+    html = html.replace('{nav_links}', nav_links)
+    html = html.replace('{flash_messages}', flash_messages)
+    html = html.replace('{content}', content)
+    
+    return html
 
 # ========== ОСНОВНЫЕ МАРШРУТЫ ==========
 @app.route('/')
@@ -641,9 +659,9 @@ def feed():
             {media_html}
             
             <div class="post-actions">
-                <button class="btn btn-small">❤️ {get_like_count(post.id)}</button>
-                <button class="btn btn-small">💬 {get_comment_count(post.id)}</button>
-                <button class="btn btn-small">👁️ {post.views_count}</button>
+                <span class="btn btn-small">❤️ {get_like_count(post.id)}</span>
+                <span class="btn btn-small">💬 {get_comment_count(post.id)}</span>
+                <span class="btn btn-small">👁️ {post.views_count}</span>
                 <a href="/profile/{author.id}" class="btn btn-small">👤 Профиль</a>
                 {f'<a href="/follow/{author.id}" class="btn btn-small btn-success">➕ Подписаться</a>' if not is_following(current_user.id, author.id) and author.id != current_user.id else ''}
                 {f'<button onclick="confirmDeletePost({post.id})" class="btn btn-small btn-danger">🗑 Удалить</button>' if post.user_id == current_user.id or current_user.is_admin else ''}
@@ -815,9 +833,9 @@ def profile(user_id):
             <div style="color: #888; text-align: right; font-size: 0.9em;">{post.created_at.strftime('%d.%m.%Y %H:%M')}</div>
             <div style="line-height: 1.6; margin: 10px 0;">{get_emoji_html(post.content)}</div>
             <div class="post-actions">
-                <button class="btn btn-small">❤️ {get_like_count(post.id)}</button>
-                <button class="btn btn-small">💬 {get_comment_count(post.id)}</button>
-                <button class="btn btn-small">👁️ {post.views_count}</button>
+                <span class="btn btn-small">❤️ {get_like_count(post.id)}</span>
+                <span class="btn btn-small">💬 {get_comment_count(post.id)}</span>
+                <span class="btn btn-small">👁️ {post.views_count}</span>
             </div>
         </div>
         '''
@@ -867,7 +885,7 @@ def profile(user_id):
                 <p>@{user.username}</p>
                 <p>📧 {user.email}</p>
                 {f'<p>🎂 Дата рождения: {user.birthday.strftime("%d.%m.%Y") if user.birthday else "Не указана"}</p>'}
-                <p>📅 Зарегистрирован: {user.created_at.strftime('%d.%m.%Y')}</p>
+                <p>📅 Зарегистрирован: {user.created_at.strftime("%d.%m.%Y")}</p>
                 
                 <div class="follow-stats">
                     <div class="follow-stat">
@@ -1555,4 +1573,4 @@ if __name__ == '__main__':
     
     # Используем порт 8321 как вы указали
     port = int(os.environ.get('PORT', 8321))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=True)
