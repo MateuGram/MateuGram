@@ -1,6 +1,6 @@
 """
 MateuGram - Синяя социальная сеть
-ПОЛНАЯ ВЕРСИЯ С СОХРАНЕНИЕМ ДАННЫХ
+ПОЛНАЯ ВЕРСИЯ С ИСПРАВЛЕНИЯМИ
 """
 
 import os
@@ -28,10 +28,14 @@ if 'RENDER' in os.environ:
     print("🌐 Обнаружен Render.com - использую постоянное хранилище...")
     # Используем папку /tmp которая сохраняется между деплоями
     DB_FILE = '/tmp/mateugram_persistent.db'
+    BACKUP_DIR = '/tmp/backups'
+    os.makedirs(BACKUP_DIR, exist_ok=True)
     app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{DB_FILE}'
     print(f"📁 База данных: {DB_FILE}")
 else:
     app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///mateugram.db'
+    BACKUP_DIR = 'backups'
+    os.makedirs(BACKUP_DIR, exist_ok=True)
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = 'static/uploads'
@@ -58,6 +62,7 @@ class User(UserMixin, db.Model):
     is_banned = db.Column(db.Boolean, default=False)
     bio = db.Column(db.Text, default='')
     avatar_filename = db.Column(db.String(200), default='')
+    birthday = db.Column(db.Date, nullable=True)
     
     # Связи
     posts = db.relationship('Post', backref='author', lazy=True, cascade='all, delete-orphan')
@@ -121,7 +126,7 @@ def validate_username(username):
     return bool(re.match(pattern, username))
 
 def allowed_file(filename):
-    ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'mp4', 'mov', 'avi', 'mkv'}
+    ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
     if '.' not in filename:
         return False
     return filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -165,29 +170,46 @@ def get_comment_count(post_id):
 def get_unread_messages_count(user_id):
     return Message.query.filter_by(receiver_id=user_id, is_read=False).count()
 
-def initialize_database():
-    """Инициализация базы данных при первом запуске"""
-    with app.app_context():
-        db.create_all()
+def user_has_liked(user_id, post_id):
+    return Like.query.filter_by(user_id=user_id, post_id=post_id).first() is not None
+
+def create_backup():
+    """Создание резервной копии базы данных"""
+    try:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
-        # Создаем администратора если его нет
-        if User.query.count() == 0:
-            print("👑 Создание первого администратора...")
-            admin = User(
-                email='admin@mateugram.com',
-                username='Admin',
-                first_name='Администратор',
-                last_name='Системы',
-                password_hash=generate_password_hash('admin123'),
-                is_admin=True
-            )
-            db.session.add(admin)
-            db.session.commit()
-            print("✅ Администратор создан!")
-            print("📧 Email: admin@mateugram.com")
-            print("🔑 Пароль: admin123")
+        if 'RENDER' in os.environ:
+            db_path = '/tmp/mateugram_persistent.db'
+            backup_path = f'/tmp/backups/mateugram_backup_{timestamp}.db'
+        else:
+            db_path = 'mateugram.db'
+            backup_path = f'backups/mateugram_backup_{timestamp}.db'
         
-        print(f"📊 База готова. Пользователей: {User.query.count()}, Постов: {Post.query.count()}")
+        if os.path.exists(db_path):
+            shutil.copy2(db_path, backup_path)
+            
+            # Удаляем старые бэкапы (оставляем последние 10)
+            backup_files = []
+            if os.path.exists(BACKUP_DIR):
+                backup_files = sorted(
+                    [f for f in os.listdir(BACKUP_DIR) if f.startswith('mateugram_backup_')],
+                    reverse=True
+                )
+                
+                for old_backup in backup_files[10:]:
+                    os.remove(os.path.join(BACKUP_DIR, old_backup))
+            
+            print(f"✅ Резервная копия создана: {backup_path}")
+            return True
+    except Exception as e:
+        print(f"❌ Ошибка создания бэкапа: {e}")
+    return False
+
+def get_avatar_url(user):
+    """Получение URL аватара пользователя"""
+    if user.avatar_filename and os.path.exists(os.path.join(app.config['UPLOAD_FOLDER'], user.avatar_filename)):
+        return f"/static/uploads/{user.avatar_filename}"
+    return None
 
 # ========== HTML ШАБЛОНЫ ==========
 BASE_HTML = '''<!DOCTYPE html>
@@ -341,6 +363,8 @@ BASE_HTML = '''<!DOCTYPE html>
             font-size: 1.3em; 
             margin-right: 15px; 
             box-shadow: 0 5px 15px rgba(42,82,152,0.2); 
+            background-size: cover;
+            background-position: center;
         }
         
         .alert { 
@@ -498,12 +522,15 @@ BASE_HTML = '''<!DOCTYPE html>
 def render_page(title, content):
     nav_links = ''
     if current_user.is_authenticated:
+        unread_count = get_unread_messages_count(current_user.id)
+        messages_badge = f' <span style="background: #dc3545; color: white; padding: 2px 6px; border-radius: 10px; font-size: 0.8em;">{unread_count}</span>' if unread_count > 0 else ''
+        
         nav_links = f'''
             <a href="/feed" class="nav-btn"><i class="fas fa-newspaper"></i> Лента</a>
             <a href="/create_post" class="nav-btn"><i class="fas fa-edit"></i> Создать пост</a>
             <a href="/profile/{current_user.id}" class="nav-btn"><i class="fas fa-user"></i> Мой профиль</a>
             <a href="/users" class="nav-btn"><i class="fas fa-users"></i> Пользователи</a>
-            <a href="/messages" class="nav-btn"><i class="fas fa-envelope"></i> Сообщения</a>
+            <a href="/messages" class="nav-btn"><i class="fas fa-envelope"></i> Сообщения{messages_badge}</a>
         '''
         if current_user.is_admin:
             nav_links += '<a href="/admin" class="nav-btn btn-admin"><i class="fas fa-crown"></i> Админ</a>'
@@ -629,6 +656,7 @@ def register():
         first_name = request.form['first_name']
         last_name = request.form['last_name']
         password = request.form['password']
+        birthday_str = request.form.get('birthday')
         
         if not validate_username(username):
             flash('Псевдоним должен содержать только английские буквы, цифры и символы _ . -', 'error')
@@ -642,13 +670,21 @@ def register():
             flash('Псевдоним уже занят', 'error')
             return redirect('/register')
         
+        birthday = None
+        if birthday_str:
+            try:
+                birthday = datetime.strptime(birthday_str, '%Y-%m-%d').date()
+            except:
+                pass
+        
         try:
             new_user = User(
                 email=email,
                 username=username,
                 first_name=first_name,
                 last_name=last_name,
-                password_hash=generate_password_hash(password)
+                password_hash=generate_password_hash(password),
+                birthday=birthday
             )
             
             db.session.add(new_user)
@@ -659,7 +695,7 @@ def register():
             return redirect('/feed')
         except Exception as e:
             db.session.rollback()
-            flash(f'❌ Ошибка при регистрации', 'error')
+            flash(f'❌ Ошибка при регистрации: {str(e)}', 'error')
             return redirect('/register')
     
     return render_page('Регистрация', '''
@@ -698,6 +734,13 @@ def register():
                     </label>
                     <input type="text" name="last_name" class="form-input" placeholder="Иванов" required>
                 </div>
+            </div>
+            
+            <div class="form-group">
+                <label style="display: block; margin-bottom: 10px; font-weight: 600; color: #2a5298;">
+                    <i class="fas fa-birthday-cake"></i> Дата рождения
+                </label>
+                <input type="date" name="birthday" class="form-input">
             </div>
             
             <div class="form-group">
@@ -823,11 +866,15 @@ def feed():
                             '''
                     media_html += '</div>'
             
+            has_liked = user_has_liked(current_user.id, post.id)
+            like_btn_text = '💔 Убрать лайк' if has_liked else '❤️ Нравится'
+            like_btn_class = 'btn-danger' if has_liked else ''
+            
             posts_html += f'''
             <div class="post">
                 <div class="post-header">
-                    <div class="avatar">
-                        {author.first_name[0]}{author.last_name[0] if author.last_name else ''}
+                    <div class="avatar" style="{f'background-image: url(/static/uploads/{author.avatar_filename})' if author.avatar_filename else ''}">
+                        {'' if author.avatar_filename else f'{author.first_name[0]}{author.last_name[0] if author.last_name else ""}'}
                     </div>
                     <div>
                         <strong style="font-size: 1.2em; color: #2a5298;">{author.first_name} {author.last_name}</strong>
@@ -848,8 +895,8 @@ def feed():
                 </div>
                 
                 <div class="post-actions">
-                    <a href="/like/{post.id}" class="btn btn-small">
-                        <i class="fas fa-heart"></i> Нравится ({get_like_count(post.id)})
+                    <a href="/like/{post.id}" class="btn btn-small {like_btn_class}">
+                        {like_btn_text} ({get_like_count(post.id)})
                     </a>
                     <button onclick="toggleComments({post.id})" class="btn btn-small">
                         <i class="fas fa-comment"></i> Комментировать ({get_comment_count(post.id)})
@@ -876,7 +923,7 @@ def feed():
             </div>
             '''
     except Exception as e:
-        posts_html = f'<div class="alert alert-error"><i class="fas fa-exclamation-circle"></i> Ошибка загрузки ленты</div>'
+        posts_html = f'<div class="alert alert-error"><i class="fas fa-exclamation-circle"></i> Ошибка загрузки ленты: {str(e)}</div>'
     
     return render_page('Лента новостей', f'''
     <div class="card">
@@ -909,19 +956,27 @@ def get_comments_html(post_id):
         for comment in comments[:10]:  # Показываем последние 10 комментариев
             author = User.query.get(comment.user_id)
             if author:
+                avatar_style = f'background-image: url(/static/uploads/{author.avatar_filename})' if author.avatar_filename else ''
+                avatar_text = '' if author.avatar_filename else f'{author.first_name[0]}{author.last_name[0] if author.last_name else ""}'
+                
                 comments_html += f'''
-                <div style="background: #f8f9fa; border-radius: 10px; padding: 10px; margin-bottom: 10px;">
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 5px; font-size: 0.9em; color: #666;">
-                        <strong>{author.first_name} {author.last_name}</strong>
-                        <span>{comment.created_at.strftime('%H:%M')}</span>
+                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                    <div class="avatar" style="width: 40px; height: 40px; font-size: 1em; {avatar_style}">
+                        {avatar_text}
                     </div>
-                    <p>{get_emoji_html(comment.content)}</p>
+                    <div style="flex: 1; background: #f8f9fa; border-radius: 10px; padding: 10px;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 5px; font-size: 0.9em; color: #666;">
+                            <strong>{author.first_name} {author.last_name}</strong>
+                            <span>{comment.created_at.strftime('%H:%M')}</span>
+                        </div>
+                        <p style="margin: 0;">{get_emoji_html(comment.content)}</p>
+                    </div>
                 </div>
                 '''
         
-        return comments_html if comments_html else '<p style="color: #999; text-align: center;">Комментариев пока нет</p>'
-    except:
-        return '<p style="color: #999; text-align: center;">Ошибка загрузки комментариев</p>'
+        return comments_html if comments_html else '<p style="color: #999; text-align: center; padding: 20px;">Комментариев пока нет</p>'
+    except Exception as e:
+        return f'<p style="color: #999; text-align: center; padding: 20px;">Ошибка загрузки комментариев</p>'
 
 @app.route('/create_post', methods=['GET', 'POST'])
 @login_required
@@ -955,7 +1010,7 @@ def create_post():
             return redirect('/feed')
         except Exception as e:
             db.session.rollback()
-            flash(f'❌ Ошибка при создании поста', 'error')
+            flash(f'❌ Ошибка при создании поста: {str(e)}', 'error')
             return redirect('/create_post')
     
     return render_page('Создать пост', '''
@@ -1003,17 +1058,17 @@ def like_post(post_id):
         
         if existing_like:
             db.session.delete(existing_like)
-            flash('💔 Лайк удален', 'info')
+            flash('💔 Лайк убран', 'info')
         else:
             new_like = Like(user_id=current_user.id, post_id=post_id)
             db.session.add(new_like)
-            flash('❤️ Посту понравилось!', 'success')
+            flash('❤️ Лайк поставлен!', 'success')
         
         db.session.commit()
         
     except Exception as e:
         db.session.rollback()
-        flash('Ошибка', 'error')
+        flash(f'Ошибка: {str(e)}', 'error')
     
     return redirect('/feed')
 
@@ -1045,7 +1100,7 @@ def add_comment(post_id):
         
     except Exception as e:
         db.session.rollback()
-        flash('Ошибка', 'error')
+        flash(f'Ошибка: {str(e)}', 'error')
     
     return redirect('/feed')
 
@@ -1056,7 +1111,7 @@ def profile(user_id):
     try:
         user = User.query.get(user_id)
         if not user or user.is_banned:
-            flash('Пользователь не найден', 'error')
+            flash('Пользователь не найден или заблокирован', 'error')
             return redirect('/users')
         
         posts = Post.query.filter_by(user_id=user_id, is_hidden=False).order_by(Post.created_at.desc()).limit(10).all()
@@ -1078,7 +1133,7 @@ def profile(user_id):
                 </div>
                 <div class="post-actions">
                     <a href="/like/{post.id}" class="btn btn-small">
-                        <i class="fas fa-heart"></i> Нравится
+                        <i class="fas fa-heart"></i> Нравится ({get_like_count(post.id)})
                     </a>
                 </div>
             </div>
@@ -1099,11 +1154,18 @@ def profile(user_id):
                 </a>
                 '''
         
+        avatar_style = f'background-image: url(/static/uploads/{user.avatar_filename})' if user.avatar_filename else ''
+        avatar_text = '' if user.avatar_filename else f'{user.first_name[0]}{user.last_name[0] if user.last_name else ""}'
+        
+        birthday_info = ''
+        if user.birthday:
+            birthday_info = f'<p style="color: #666;"><i class="fas fa-birthday-cake"></i> Дата рождения: {user.birthday.strftime("%d.%m.%Y")}</p>'
+        
         return render_page(f'Профиль {user.first_name}', f'''
         <div class="card">
             <div style="display: flex; align-items: center; margin-bottom: 30px;">
-                <div class="avatar" style="width: 100px; height: 100px; font-size: 2em;">
-                    {user.first_name[0]}{user.last_name[0] if user.last_name else ''}
+                <div class="avatar" style="width: 100px; height: 100px; font-size: 2em; {avatar_style}">
+                    {avatar_text}
                 </div>
                 <div style="margin-left: 30px;">
                     <h2 style="margin: 0;">{user.first_name} {user.last_name}</h2>
@@ -1115,6 +1177,7 @@ def profile(user_id):
                         <i class="fas fa-envelope"></i> {user.email} • 
                         <i class="fas fa-calendar"></i> Зарегистрирован {user.created_at.strftime('%d.%m.%Y')}
                     </p>
+                    {birthday_info}
                 </div>
             </div>
             
@@ -1156,7 +1219,7 @@ def profile(user_id):
         ''')
         
     except Exception as e:
-        flash('Ошибка загрузки профиля', 'error')
+        flash(f'Ошибка загрузки профиля: {str(e)}', 'error')
         return redirect('/users')
 
 @app.route('/edit_profile', methods=['GET', 'POST'])
@@ -1166,7 +1229,23 @@ def edit_profile():
         try:
             current_user.first_name = request.form.get('first_name', current_user.first_name)
             current_user.last_name = request.form.get('last_name', current_user.last_name)
+            current_user.username = request.form.get('username', current_user.username)
             current_user.bio = request.form.get('bio', current_user.bio)
+            
+            birthday_str = request.form.get('birthday')
+            if birthday_str:
+                try:
+                    current_user.birthday = datetime.strptime(birthday_str, '%Y-%m-%d').date()
+                except:
+                    current_user.birthday = None
+            else:
+                current_user.birthday = None
+            
+            # Проверка уникальности имени пользователя
+            existing_user = User.query.filter_by(username=current_user.username).first()
+            if existing_user and existing_user.id != current_user.id:
+                flash('Этот псевдоним уже занят', 'error')
+                return redirect('/edit_profile')
             
             if 'avatar' in request.files:
                 file = request.files['avatar']
@@ -1181,11 +1260,20 @@ def edit_profile():
             
         except Exception as e:
             db.session.rollback()
-            flash(f'❌ Ошибка обновления профиля', 'error')
+            flash(f'❌ Ошибка обновления профиля: {str(e)}', 'error')
+    
+    avatar_style = f'background-image: url(/static/uploads/{current_user.avatar_filename})' if current_user.avatar_filename else ''
+    avatar_text = '' if current_user.avatar_filename else f'{current_user.first_name[0]}{current_user.last_name[0] if current_user.last_name else ""}'
     
     return render_page('Редактировать профиль', f'''
     <div class="card">
         <h2><i class="fas fa-edit"></i> Редактировать профиль</h2>
+        
+        <div style="text-align: center; margin-bottom: 30px;">
+            <div class="avatar" style="width: 120px; height: 120px; font-size: 2.5em; margin: 0 auto; {avatar_style}">
+                {avatar_text}
+            </div>
+        </div>
         
         <form method="POST" enctype="multipart/form-data">
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
@@ -1206,6 +1294,16 @@ def edit_profile():
             
             <div class="form-group">
                 <label style="display: block; margin-bottom: 10px; font-weight: 600; color: #2a5298;">
+                    <i class="fas fa-user"></i> Псевдоним
+                </label>
+                <input type="text" name="username" class="form-input" value="{current_user.username}" required>
+                <small style="color: #666; display: block; margin-top: 8px;">
+                    <i class="fas fa-info-circle"></i> Только английские буквы, цифры и символы _ . -
+                </small>
+            </div>
+            
+            <div class="form-group">
+                <label style="display: block; margin-bottom: 10px; font-weight: 600; color: #2a5298;">
                     <i class="fas fa-quote-left"></i> О себе
                 </label>
                 <textarea name="bio" class="form-input" rows="4" placeholder="Расскажите о себе...">{current_user.bio or ''}</textarea>
@@ -1213,9 +1311,19 @@ def edit_profile():
             
             <div class="form-group">
                 <label style="display: block; margin-bottom: 10px; font-weight: 600; color: #2a5298;">
+                    <i class="fas fa-birthday-cake"></i> Дата рождения
+                </label>
+                <input type="date" name="birthday" class="form-input" value="{current_user.birthday.strftime('%Y-%m-%d') if current_user.birthday else ''}">
+            </div>
+            
+            <div class="form-group">
+                <label style="display: block; margin-bottom: 10px; font-weight: 600; color: #2a5298;">
                     <i class="fas fa-image"></i> Аватар
                 </label>
                 <input type="file" name="avatar" class="form-input" accept="image/*">
+                <small style="color: #666; display: block; margin-top: 8px;">
+                    <i class="fas fa-info-circle"></i> Рекомендуемый размер: 200x200 пикселей
+                </small>
             </div>
             
             <button type="submit" class="btn" style="width: 100%; padding: 18px; font-size: 18px;">
@@ -1250,7 +1358,7 @@ def follow_user(user_id):
         
     except Exception as e:
         db.session.rollback()
-        flash('Ошибка', 'error')
+        flash(f'Ошибка: {str(e)}', 'error')
     
     return redirect(f'/profile/{user_id}')
 
@@ -1273,7 +1381,7 @@ def unfollow_user(user_id):
         
     except Exception as e:
         db.session.rollback()
-        flash('Ошибка', 'error')
+        flash(f'Ошибка: {str(e)}', 'error')
     
     return redirect(f'/profile/{user_id}')
 
@@ -1301,11 +1409,14 @@ def users():
             if user.id == current_user.id:
                 continue
                 
+            avatar_style = f'background-image: url(/static/uploads/{user.avatar_filename})' if user.avatar_filename else ''
+            avatar_text = '' if user.avatar_filename else f'{user.first_name[0]}{user.last_name[0] if user.last_name else ""}'
+                
             users_html += f'''
             <div class="user-card">
                 <div style="display: flex; align-items: center; margin-bottom: 15px;">
-                    <div class="avatar" style="width: 50px; height: 50px; font-size: 1em;">
-                        {user.first_name[0]}{user.last_name[0] if user.last_name else ''}
+                    <div class="avatar" style="width: 50px; height: 50px; font-size: 1em; {avatar_style}">
+                        {avatar_text}
                     </div>
                     <div style="margin-left: 15px;">
                         <strong style="color: #2a5298;">{user.first_name} {user.last_name}</strong>
@@ -1350,7 +1461,7 @@ def users():
         ''')
         
     except Exception as e:
-        flash('Ошибка загрузки пользователей', 'error')
+        flash(f'Ошибка загрузки пользователей: {str(e)}', 'error')
         return redirect('/feed')
 
 # ========== СООБЩЕНИЯ ==========
@@ -1362,13 +1473,19 @@ def messages(user_id=None):
         if user_id:
             other_user = User.query.get(user_id)
             if not other_user or other_user.is_banned:
-                flash('Пользователь не найден', 'error')
+                flash('Пользователь не найден или заблокирован', 'error')
                 return redirect('/messages')
             
             messages_list = Message.query.filter(
                 ((Message.sender_id == current_user.id) & (Message.receiver_id == user_id)) |
                 ((Message.sender_id == user_id) & (Message.receiver_id == current_user.id))
             ).order_by(Message.created_at).all()
+            
+            # Помечаем сообщения как прочитанные
+            for message in messages_list:
+                if message.receiver_id == current_user.id and not message.is_read:
+                    message.is_read = True
+                    db.session.commit()
             
             chat_html = ''
             for message in messages_list:
@@ -1386,14 +1503,17 @@ def messages(user_id=None):
                 </div>
                 '''
             
+            avatar_style = f'background-image: url(/static/uploads/{other_user.avatar_filename})' if other_user.avatar_filename else ''
+            avatar_text = '' if other_user.avatar_filename else f'{other_user.first_name[0]}{other_user.last_name[0] if other_user.last_name else ""}'
+            
             return render_page(f'Чат с {other_user.first_name}', f'''
             <div class="card">
                 <div style="display: flex; align-items: center; margin-bottom: 25px;">
                     <a href="/messages" class="btn btn-small" style="margin-right: 20px;">
                         <i class="fas fa-arrow-left"></i> Назад
                     </a>
-                    <div class="avatar" style="width: 50px; height: 50px;">
-                        {other_user.first_name[0]}{other_user.last_name[0] if other_user.last_name else ''}
+                    <div class="avatar" style="width: 50px; height: 50px; {avatar_style}">
+                        {avatar_text}
                     </div>
                     <div style="margin-left: 15px;">
                         <h3 style="margin: 0;">{other_user.first_name} {other_user.last_name}</h3>
@@ -1422,7 +1542,6 @@ def messages(user_id=None):
         
         else:
             # Список диалогов
-            conversations = []
             sent_messages = Message.query.filter_by(sender_id=current_user.id).all()
             received_messages = Message.query.filter_by(receiver_id=current_user.id).all()
             
@@ -1457,13 +1576,16 @@ def messages(user_id=None):
                 if len(last_message_text) > 50:
                     last_message_text = last_message_text[:50] + '...'
                 
+                avatar_style = f'background-image: url(/static/uploads/{other_user.avatar_filename})' if other_user.avatar_filename else ''
+                avatar_text = '' if other_user.avatar_filename else f'{other_user.first_name[0]}{other_user.last_name[0] if other_user.last_name else ""}'
+                
                 conversations_html += f'''
                 <a href="/messages/{other_user.id}" style="text-decoration: none; color: inherit;">
                     <div class="user-card" style="cursor: pointer;">
                         <div style="display: flex; align-items: center; justify-content: space-between;">
                             <div style="display: flex; align-items: center;">
-                                <div class="avatar" style="width: 50px; height: 50px;">
-                                    {other_user.first_name[0]}{other_user.last_name[0] if other_user.last_name else ''}
+                                <div class="avatar" style="width: 50px; height: 50px; {avatar_style}">
+                                    {avatar_text}
                                 </div>
                                 <div style="margin-left: 15px;">
                                     <strong style="color: #2a5298;">{other_user.first_name} {other_user.last_name}</strong>
@@ -1478,11 +1600,13 @@ def messages(user_id=None):
                 </a>
                 '''
             
+            unread_total = get_unread_messages_count(current_user.id)
+            
             return render_page('Сообщения', f'''
             <div class="card">
                 <h2><i class="fas fa-envelope"></i> Сообщения</h2>
                 <p style="color: #666; margin-bottom: 20px;">
-                    <i class="fas fa-bell"></i> Непрочитанных: {get_unread_messages_count(current_user.id)}
+                    <i class="fas fa-bell"></i> Непрочитанных: {unread_total}
                 </p>
                 
                 {conversations_html if conversations_html else '''
@@ -1496,7 +1620,7 @@ def messages(user_id=None):
             ''')
             
     except Exception as e:
-        flash('Ошибка загрузки сообщений', 'error')
+        flash(f'Ошибка загрузки сообщений: {str(e)}', 'error')
         return redirect('/feed')
 
 @app.route('/send_message/<int:receiver_id>', methods=['POST'])
@@ -1527,7 +1651,7 @@ def send_message(receiver_id):
         
     except Exception as e:
         db.session.rollback()
-        flash('Ошибка', 'error')
+        flash(f'Ошибка: {str(e)}', 'error')
     
     return redirect(f'/messages/{receiver_id}')
 
@@ -1612,16 +1736,102 @@ def admin_panel():
         <div class="card">
             <h3><i class="fas fa-tools"></i> Инструменты администратора</h3>
             <div style="display: flex; gap: 15px; flex-wrap: wrap; margin-top: 20px;">
+                <a href="/admin/backup" class="btn">
+                    <i class="fas fa-database"></i> Создать бэкап
+                </a>
                 <a href="/admin/users" class="btn">
                     <i class="fas fa-users-cog"></i> Управление пользователями
+                </a>
+                <a href="/admin/stats" class="btn">
+                    <i class="fas fa-chart-bar"></i> Статистика
                 </a>
             </div>
         </div>
         ''')
         
     except Exception as e:
-        flash('Ошибка загрузки админ-панели', 'error')
+        flash(f'Ошибка загрузки админ-панели: {str(e)}', 'error')
         return redirect('/feed')
+
+@app.route('/admin/backup')
+@login_required
+def admin_backup():
+    if not current_user.is_admin:
+        flash('Доступ запрещен', 'error')
+        return redirect('/feed')
+    
+    if create_backup():
+        flash('✅ Резервная копия успешно создана', 'success')
+    else:
+        flash('❌ Ошибка создания резервной копии', 'error')
+    
+    return redirect('/admin')
+
+@app.route('/admin/stats')
+@login_required
+def admin_stats():
+    if not current_user.is_admin:
+        flash('Доступ запрещен', 'error')
+        return redirect('/feed')
+    
+    try:
+        total_users = User.query.count()
+        total_posts = Post.query.count()
+        total_comments = Comment.query.count()
+        total_messages = Message.query.count()
+        total_likes = Like.query.count()
+        
+        # Статистика по дням
+        import datetime as dt
+        today = dt.date.today()
+        week_ago = today - dt.timedelta(days=7)
+        
+        recent_users = User.query.filter(User.created_at >= week_ago).count()
+        recent_posts = Post.query.filter(Post.created_at >= week_ago).count()
+        
+        return render_page('Статистика', f'''
+        <div class="card">
+            <h2><i class="fas fa-chart-bar"></i> Статистика системы</h2>
+            
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="stat-number">{total_users}</div>
+                    <div class="stat-label">Всего пользователей</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">{total_posts}</div>
+                    <div class="stat-label">Всего постов</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">{total_comments}</div>
+                    <div class="stat-label">Всего комментариев</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">{total_messages}</div>
+                    <div class="stat-label">Всего сообщений</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">{total_likes}</div>
+                    <div class="stat-label">Всего лайков</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">{recent_users}</div>
+                    <div class="stat-label">Новых за неделю</div>
+                </div>
+            </div>
+            
+            <div class="info-box" style="margin-top: 30px;">
+                <h3><i class="fas fa-info-circle"></i> Информация о системе</h3>
+                <p><strong>База данных:</strong> {app.config['SQLALCHEMY_DATABASE_URI']}</p>
+                <p><strong>Папка загрузок:</strong> {app.config['UPLOAD_FOLDER']}</p>
+                <p><strong>Макс. размер файла:</strong> {app.config['MAX_CONTENT_LENGTH'] // (1024*1024)} MB</p>
+            </div>
+        </div>
+        ''')
+        
+    except Exception as e:
+        flash(f'Ошибка загрузки статистики: {str(e)}', 'error')
+        return redirect('/admin')
 
 @app.route('/admin/users')
 @login_required
@@ -1676,7 +1886,7 @@ def admin_users():
         ''')
         
     except Exception as e:
-        flash('Ошибка загрузки пользователей', 'error')
+        flash(f'Ошибка загрузки пользователей: {str(e)}', 'error')
         return redirect('/admin')
 
 @app.route('/admin/user/<int:user_id>', methods=['GET', 'POST'])
@@ -1700,16 +1910,45 @@ def admin_edit_user(user_id):
             user.is_admin = request.form.get('is_admin') == '1'
             user.is_banned = request.form.get('is_banned') == '1'
             
+            birthday_str = request.form.get('birthday')
+            if birthday_str:
+                try:
+                    user.birthday = datetime.strptime(birthday_str, '%Y-%m-%d').date()
+                except:
+                    user.birthday = None
+            else:
+                user.birthday = None
+            
+            # Проверка уникальности
+            existing_user = User.query.filter_by(username=user.username).first()
+            if existing_user and existing_user.id != user.id:
+                flash('Этот псевдоним уже занят', 'error')
+                return redirect(f'/admin/user/{user_id}')
+            
+            existing_email = User.query.filter_by(email=user.email).first()
+            if existing_email and existing_email.id != user.id:
+                flash('Этот email уже используется', 'error')
+                return redirect(f'/admin/user/{user_id}')
+            
             db.session.commit()
             flash('✅ Данные пользователя обновлены', 'success')
             return redirect('/admin/users')
         except Exception as e:
             db.session.rollback()
-            flash('❌ Ошибка обновления', 'error')
+            flash(f'❌ Ошибка обновления: {str(e)}', 'error')
+    
+    avatar_style = f'background-image: url(/static/uploads/{user.avatar_filename})' if user.avatar_filename else ''
+    avatar_text = '' if user.avatar_filename else f'{user.first_name[0]}{user.last_name[0] if user.last_name else ""}'
     
     return render_page(f'Редактирование пользователя', f'''
     <div class="card">
         <h2><i class="fas fa-user-edit"></i> Редактирование пользователя</h2>
+        
+        <div style="text-align: center; margin-bottom: 30px;">
+            <div class="avatar" style="width: 100px; height: 100px; font-size: 2em; margin: 0 auto; {avatar_style}">
+                {avatar_text}
+            </div>
+        </div>
         
         <form method="POST">
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
@@ -1740,6 +1979,13 @@ def admin_edit_user(user_id):
                     <i class="fas fa-user"></i> Псевдоним
                 </label>
                 <input type="text" name="username" class="form-input" value="{user.username}" required>
+            </div>
+            
+            <div class="form-group">
+                <label style="display: block; margin-bottom: 10px; font-weight: 600; color: #2a5298;">
+                    <i class="fas fa-birthday-cake"></i> Дата рождения
+                </label>
+                <input type="date" name="birthday" class="form-input" value="{user.birthday.strftime('%Y-%m-%d') if user.birthday else ''}">
             </div>
             
             <div style="display: flex; gap: 20px; margin-bottom: 20px;">
@@ -1782,34 +2028,6 @@ def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 # ========== ИНИЦИАЛИЗАЦИЯ И ЗАПУСК ==========
-def create_backup():
-    """Создание резервной копии базы данных"""
-    try:
-        if 'RENDER' in os.environ:
-            db_path = '/tmp/mateugram_persistent.db'
-            backup_path = '/tmp/mateugram_backup.db'
-            if os.path.exists(db_path):
-                shutil.copy2(db_path, backup_path)
-                print(f"✅ Резервная копия создана: {backup_path}")
-                return True
-    except Exception as e:
-        print(f"❌ Ошибка создания бэкапа: {e}")
-    return False
-
-def restore_backup():
-    """Восстановление из резервной копии"""
-    try:
-        if 'RENDER' in os.environ:
-            backup_path = '/tmp/mateugram_backup.db'
-            db_path = '/tmp/mateugram_persistent.db'
-            if os.path.exists(backup_path):
-                shutil.copy2(backup_path, db_path)
-                print(f"✅ База восстановлена из резервной копии")
-                return True
-    except Exception as e:
-        print(f"❌ Ошибка восстановления: {e}")
-    return False
-
 # Создаем бэкап при завершении
 atexit.register(create_backup)
 
@@ -1835,6 +2053,9 @@ with app.app_context():
         print("🔑 Пароль: admin123")
     
     print(f"✅ MateuGram запущен! Пользователей: {User.query.count()}, Постов: {Post.query.count()}")
+    
+    # Создаем начальный бэкап
+    create_backup()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8321))
