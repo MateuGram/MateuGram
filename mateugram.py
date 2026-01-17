@@ -1,6 +1,6 @@
 """
 MateuGram - Синяя социальная сеть
-ПОЛНАЯ ВЕРСИЯ С ИСПРАВЛЕНИЯМИ
+ПОЛНАЯ ВЕРСИЯ С ИСПРАВЛЕНИЯМИ И ДОПОЛНЕНИЯМИ
 """
 
 import os
@@ -72,6 +72,8 @@ class User(UserMixin, db.Model):
     received_messages = db.relationship('Message', foreign_keys='Message.receiver_id', backref='receiver', lazy=True)
     following = db.relationship('Follow', foreign_keys='Follow.follower_id', backref='follower', lazy=True)
     followers = db.relationship('Follow', foreign_keys='Follow.followed_id', backref='followed', lazy=True)
+    reports_sent = db.relationship('Report', foreign_keys='Report.reporter_id', backref='reporter', lazy=True)
+    reports_received = db.relationship('Report', foreign_keys='Report.reported_id', backref='reported', lazy=True)
 
 class Follow(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -112,6 +114,19 @@ class Message(db.Model):
     receiver_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     is_read = db.Column(db.Boolean, default=False)
+    is_deleted = db.Column(db.Boolean, default=False)
+
+class Report(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    reporter_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    reported_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    post_id = db.Column(db.Integer, db.ForeignKey('post.id'), nullable=True)
+    message_id = db.Column(db.Integer, db.ForeignKey('message.id'), nullable=True)
+    reason = db.Column(db.Text, nullable=False)
+    status = db.Column(db.String(20), default='pending')  # pending, reviewed, resolved, rejected
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    reviewed_at = db.Column(db.DateTime, nullable=True)
+    admin_notes = db.Column(db.Text, default='')
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -168,7 +183,7 @@ def get_comment_count(post_id):
     return Comment.query.filter_by(post_id=post_id).count()
 
 def get_unread_messages_count(user_id):
-    return Message.query.filter_by(receiver_id=user_id, is_read=False).count()
+    return Message.query.filter_by(receiver_id=user_id, is_read=False, is_deleted=False).count()
 
 def user_has_liked(user_id, post_id):
     return Like.query.filter_by(user_id=user_id, post_id=post_id).first() is not None
@@ -200,9 +215,32 @@ def create_backup():
                     os.remove(os.path.join(BACKUP_DIR, old_backup))
             
             print(f"✅ Резервная копия создана: {backup_path}")
-            return True
+            return backup_path
     except Exception as e:
         print(f"❌ Ошибка создания бэкапа: {e}")
+    return None
+
+def restore_backup(backup_filename):
+    """Восстановление из резервной копии"""
+    try:
+        backup_path = os.path.join(BACKUP_DIR, backup_filename)
+        
+        if 'RENDER' in os.environ:
+            db_path = '/tmp/mateugram_persistent.db'
+        else:
+            db_path = 'mateugram.db'
+        
+        if os.path.exists(backup_path):
+            # Закрываем все соединения с базой данных
+            db.session.remove()
+            
+            # Копируем бэкап на место основной базы
+            shutil.copy2(backup_path, db_path)
+            
+            print(f"✅ База данных восстановлена из: {backup_path}")
+            return True
+    except Exception as e:
+        print(f"❌ Ошибка восстановления бэкапа: {e}")
     return False
 
 def get_avatar_url(user):
@@ -210,6 +248,27 @@ def get_avatar_url(user):
     if user.avatar_filename and os.path.exists(os.path.join(app.config['UPLOAD_FOLDER'], user.avatar_filename)):
         return f"/static/uploads/{user.avatar_filename}"
     return None
+
+def get_backup_list():
+    """Получение списка доступных резервных копий"""
+    try:
+        if os.path.exists(BACKUP_DIR):
+            backups = []
+            for filename in os.listdir(BACKUP_DIR):
+                if filename.startswith('mateugram_backup_') and filename.endswith('.db'):
+                    filepath = os.path.join(BACKUP_DIR, filename)
+                    file_size = os.path.getsize(filepath) // 1024  # Размер в KB
+                    backups.append({
+                        'filename': filename,
+                        'size': file_size,
+                        'created_at': datetime.fromtimestamp(os.path.getctime(filepath))
+                    })
+            # Сортируем по дате создания (новые сверху)
+            backups.sort(key=lambda x: x['created_at'], reverse=True)
+            return backups
+    except Exception as e:
+        print(f"Ошибка получения списка бэкапов: {e}")
+    return []
 
 # ========== HTML ШАБЛОНЫ ==========
 BASE_HTML = '''<!DOCTYPE html>
@@ -475,6 +534,15 @@ BASE_HTML = '''<!DOCTYPE html>
         td { padding: 16px; border-bottom: 1px solid #e1e8ed; }
         tr:hover { background: rgba(248,249,250,0.8); }
         
+        .backup-list { margin: 20px 0; }
+        .backup-item { 
+            background: rgba(248,249,250,0.9); 
+            padding: 15px; 
+            margin-bottom: 10px; 
+            border-radius: 10px; 
+            border-left: 4px solid #2a5298;
+        }
+        
         @media (max-width: 768px) {
             .container { padding: 10px; }
             .header h1 { font-size: 2.2em; }
@@ -513,6 +581,15 @@ BASE_HTML = '''<!DOCTYPE html>
             commentsDiv.style.display = 'block';
         } else {
             commentsDiv.style.display = 'none';
+        }
+    }
+    
+    function showReportForm(postId, userId) {
+        const form = document.getElementById('report-form-' + postId);
+        if (form.style.display === 'none') {
+            form.style.display = 'block';
+        } else {
+            form.style.display = 'none';
         }
     }
     </script>
@@ -904,6 +981,35 @@ def feed():
                     <a href="/profile/{author.id}" class="btn btn-small">
                         <i class="fas fa-user"></i> Профиль
                     </a>
+                    <button onclick="showReportForm({post.id}, {author.id})" class="btn btn-small btn-warning">
+                        <i class="fas fa-flag"></i> Пожаловаться
+                    </button>
+                </div>
+                
+                <div id="report-form-{post.id}" style="display: none; margin-top: 15px; padding: 15px; background: #f8f9fa; border-radius: 10px;">
+                    <form method="POST" action="/report/post/{post.id}">
+                        <div class="form-group">
+                            <label style="display: block; margin-bottom: 10px; font-weight: 600; color: #2a5298;">
+                                Причина жалобы
+                            </label>
+                            <select name="reason" class="form-input" required>
+                                <option value="">Выберите причину</option>
+                                <option value="spam">Спам</option>
+                                <option value="harassment">Оскорбления</option>
+                                <option value="inappropriate">Неуместный контент</option>
+                                <option value="other">Другое</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <textarea name="details" class="form-input" rows="3" placeholder="Дополнительные детали (необязательно)"></textarea>
+                        </div>
+                        <button type="submit" class="btn btn-warning btn-small">
+                            <i class="fas fa-paper-plane"></i> Отправить жалобу
+                        </button>
+                        <button type="button" onclick="showReportForm({post.id}, {author.id})" class="btn btn-small btn-danger">
+                            Отмена
+                        </button>
+                    </form>
                 </div>
                 
                 <div id="comments-{post.id}" style="display: none; margin-top: 20px; padding-top: 20px; border-top: 1px solid #e1e8ed;">
@@ -1104,6 +1210,112 @@ def add_comment(post_id):
     
     return redirect('/feed')
 
+# ========== СИСТЕМА ЖАЛОБ ==========
+@app.route('/report/post/<int:post_id>', methods=['POST'])
+@login_required
+def report_post(post_id):
+    try:
+        post = Post.query.get(post_id)
+        if not post:
+            flash('Пост не найден', 'error')
+            return redirect('/feed')
+        
+        if post.user_id == current_user.id:
+            flash('Нельзя пожаловаться на свой пост', 'error')
+            return redirect('/feed')
+        
+        reason = request.form.get('reason', '').strip()
+        details = request.form.get('details', '').strip()
+        
+        if not reason:
+            flash('Укажите причину жалобы', 'error')
+            return redirect('/feed')
+        
+        full_reason = f"{reason}"
+        if details:
+            full_reason += f": {details}"
+        
+        # Проверяем, не отправлял ли уже пользователь жалобу на этот пост
+        existing_report = Report.query.filter_by(
+            reporter_id=current_user.id,
+            post_id=post_id,
+            status='pending'
+        ).first()
+        
+        if existing_report:
+            flash('Вы уже отправили жалобу на этот пост', 'info')
+            return redirect('/feed')
+        
+        new_report = Report(
+            reporter_id=current_user.id,
+            reported_id=post.user_id,
+            post_id=post_id,
+            reason=full_reason
+        )
+        
+        db.session.add(new_report)
+        db.session.commit()
+        
+        flash('✅ Жалоба отправлена администратору', 'success')
+        
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Ошибка при отправке жалобы: {str(e)}', 'error')
+    
+    return redirect('/feed')
+
+@app.route('/report/user/<int:user_id>', methods=['POST'])
+@login_required
+def report_user(user_id):
+    try:
+        user = User.query.get(user_id)
+        if not user:
+            flash('Пользователь не найден', 'error')
+            return redirect(f'/profile/{user_id}')
+        
+        if user_id == current_user.id:
+            flash('Нельзя пожаловаться на себя', 'error')
+            return redirect(f'/profile/{user_id}')
+        
+        reason = request.form.get('reason', '').strip()
+        details = request.form.get('details', '').strip()
+        
+        if not reason:
+            flash('Укажите причину жалобы', 'error')
+            return redirect(f'/profile/{user_id}')
+        
+        full_reason = f"{reason}"
+        if details:
+            full_reason += f": {details}"
+        
+        # Проверяем, не отправлял ли уже пользователь жалобу на этого пользователя
+        existing_report = Report.query.filter_by(
+            reporter_id=current_user.id,
+            reported_id=user_id,
+            status='pending'
+        ).first()
+        
+        if existing_report:
+            flash('Вы уже отправили жалобу на этого пользователя', 'info')
+            return redirect(f'/profile/{user_id}')
+        
+        new_report = Report(
+            reporter_id=current_user.id,
+            reported_id=user_id,
+            reason=full_reason
+        )
+        
+        db.session.add(new_report)
+        db.session.commit()
+        
+        flash('✅ Жалоба отправлена администратору', 'success')
+        
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Ошибка при отправке жалобы: {str(e)}', 'error')
+    
+    return redirect(f'/profile/{user_id}')
+
 # ========== ПРОФИЛИ ==========
 @app.route('/profile/<int:user_id>')
 @login_required
@@ -1140,6 +1352,7 @@ def profile(user_id):
             '''
         
         follow_button = ''
+        report_button = ''
         if current_user.id != user_id:
             if is_following(current_user.id, user_id):
                 follow_button = f'''
@@ -1153,6 +1366,12 @@ def profile(user_id):
                     <i class="fas fa-user-plus"></i> Подписаться
                 </a>
                 '''
+            
+            report_button = f'''
+            <button onclick="document.getElementById('report-user-form').style.display='block'" class="btn btn-warning">
+                <i class="fas fa-flag"></i> Пожаловаться
+            </button>
+            '''
         
         avatar_style = f'background-image: url(/static/uploads/{user.avatar_filename})' if user.avatar_filename else ''
         avatar_text = '' if user.avatar_filename else f'{user.first_name[0]}{user.last_name[0] if user.last_name else ""}'
@@ -1160,6 +1379,40 @@ def profile(user_id):
         birthday_info = ''
         if user.birthday:
             birthday_info = f'<p style="color: #666;"><i class="fas fa-birthday-cake"></i> Дата рождения: {user.birthday.strftime("%d.%m.%Y")}</p>'
+        
+        report_form = ''
+        if current_user.id != user_id:
+            report_form = f'''
+            <div id="report-user-form" style="display: none; margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 15px;">
+                <h4><i class="fas fa-flag"></i> Пожаловаться на пользователя</h4>
+                <form method="POST" action="/report/user/{user_id}">
+                    <div class="form-group">
+                        <label style="display: block; margin-bottom: 10px; font-weight: 600; color: #2a5298;">
+                            Причина жалобы
+                        </label>
+                        <select name="reason" class="form-input" required>
+                            <option value="">Выберите причину</option>
+                            <option value="harassment">Оскорбления</option>
+                            <option value="spam">Спам</option>
+                            <option value="fake_account">Фейковый аккаунт</option>
+                            <option value="inappropriate_content">Неуместный контент</option>
+                            <option value="other">Другое</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <textarea name="details" class="form-input" rows="3" placeholder="Дополнительные детали (необязательно)"></textarea>
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <button type="submit" class="btn btn-warning">
+                            <i class="fas fa-paper-plane"></i> Отправить жалобу
+                        </button>
+                        <button type="button" onclick="document.getElementById('report-user-form').style.display='none'" class="btn btn-danger">
+                            Отмена
+                        </button>
+                    </div>
+                </form>
+            </div>
+            '''
         
         return render_page(f'Профиль {user.first_name}', f'''
         <div class="card">
@@ -1203,8 +1456,11 @@ def profile(user_id):
                 <a href="/messages/{user_id}" class="btn">
                     <i class="fas fa-envelope"></i> Сообщение
                 </a>
+                {report_button}
                 {f'<a href="/edit_profile" class="btn"><i class="fas fa-edit"></i> Редактировать профиль</a>' if current_user.id == user_id else ''}
             </div>
+            
+            {report_form}
         </div>
         
         <div class="card">
@@ -1479,7 +1735,7 @@ def messages(user_id=None):
             messages_list = Message.query.filter(
                 ((Message.sender_id == current_user.id) & (Message.receiver_id == user_id)) |
                 ((Message.sender_id == user_id) & (Message.receiver_id == current_user.id))
-            ).order_by(Message.created_at).all()
+            ).filter_by(is_deleted=False).order_by(Message.created_at).all()
             
             # Помечаем сообщения как прочитанные
             for message in messages_list:
@@ -1490,6 +1746,16 @@ def messages(user_id=None):
             chat_html = ''
             for message in messages_list:
                 is_sent = message.sender_id == current_user.id
+                delete_button = ''
+                if is_sent:
+                    delete_button = f'''
+                    <div style="text-align: center; margin-top: 5px;">
+                        <a href="/delete_message/{message.id}" onclick="return confirm('Вы уверены, что хотите удалить это сообщение?')" class="btn btn-small btn-danger" style="padding: 5px 10px; font-size: 12px;">
+                            <i class="fas fa-trash"></i> Удалить
+                        </a>
+                    </div>
+                    '''
+                
                 chat_html += f'''
                 <div style="margin-bottom: 15px; clear: both;">
                     <div style="float: {'right' if is_sent else 'left'}; text-align: {'right' if is_sent else 'left'}; max-width: 70%;">
@@ -1499,6 +1765,7 @@ def messages(user_id=None):
                         <div style="font-size: 0.8em; color: #999;">
                             {message.created_at.strftime('%H:%M %d.%m')}
                         </div>
+                        {delete_button}
                     </div>
                 </div>
                 '''
@@ -1542,8 +1809,8 @@ def messages(user_id=None):
         
         else:
             # Список диалогов
-            sent_messages = Message.query.filter_by(sender_id=current_user.id).all()
-            received_messages = Message.query.filter_by(receiver_id=current_user.id).all()
+            sent_messages = Message.query.filter_by(sender_id=current_user.id, is_deleted=False).all()
+            received_messages = Message.query.filter_by(receiver_id=current_user.id, is_deleted=False).all()
             
             all_messages = sent_messages + received_messages
             
@@ -1557,7 +1824,8 @@ def messages(user_id=None):
                         unread_count = Message.query.filter_by(
                             sender_id=other_id,
                             receiver_id=current_user.id,
-                            is_read=False
+                            is_read=False,
+                            is_deleted=False
                         ).count()
                         
                         user_dict[other_id] = {
@@ -1655,6 +1923,33 @@ def send_message(receiver_id):
     
     return redirect(f'/messages/{receiver_id}')
 
+@app.route('/delete_message/<int:message_id>')
+@login_required
+def delete_message(message_id):
+    try:
+        message = Message.query.get(message_id)
+        
+        if not message:
+            flash('Сообщение не найдено', 'error')
+            return redirect('/messages')
+        
+        # Проверяем, что пользователь является отправителем сообщения
+        if message.sender_id != current_user.id:
+            flash('Вы можете удалять только свои сообщения', 'error')
+            return redirect('/messages')
+        
+        # Вместо удаления помечаем как удаленное
+        message.is_deleted = True
+        db.session.commit()
+        
+        flash('✅ Сообщение удалено', 'success')
+        
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Ошибка удаления сообщения: {str(e)}', 'error')
+    
+    return redirect('/messages')
+
 # ========== АДМИН-ПАНЕЛЬ ==========
 @app.route('/admin')
 @login_required
@@ -1668,6 +1963,7 @@ def admin_panel():
         total_posts = Post.query.count()
         total_comments = Comment.query.count()
         banned_users = User.query.filter_by(is_banned=True).count()
+        pending_reports = Report.query.filter_by(status='pending').count()
         
         recent_users = User.query.order_by(User.created_at.desc()).limit(5).all()
         
@@ -1684,6 +1980,9 @@ def admin_panel():
                 <td>
                     <a href="/admin/user/{user.id}" class="btn btn-small">
                         <i class="fas fa-edit"></i>
+                    </a>
+                    <a href="/admin/delete_user/{user.id}" onclick="return confirm('Вы уверены, что хотите удалить этого пользователя? Это действие нельзя отменить!')" class="btn btn-small btn-danger">
+                        <i class="fas fa-trash"></i>
                     </a>
                 </td>
             </tr>
@@ -1709,6 +2008,10 @@ def admin_panel():
                 <div class="stat-item">
                     <div class="stat-number">{banned_users}</div>
                     <div class="stat-label">Заблокированных</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">{pending_reports}</div>
+                    <div class="stat-label">Жалоб на рассмотрении</div>
                 </div>
             </div>
         </div>
@@ -1739,8 +2042,14 @@ def admin_panel():
                 <a href="/admin/backup" class="btn">
                     <i class="fas fa-database"></i> Создать бэкап
                 </a>
+                <a href="/admin/restore" class="btn">
+                    <i class="fas fa-history"></i> Восстановить бэкап
+                </a>
                 <a href="/admin/users" class="btn">
                     <i class="fas fa-users-cog"></i> Управление пользователями
+                </a>
+                <a href="/admin/reports" class="btn">
+                    <i class="fas fa-flag"></i> Жалобы ({pending_reports})
                 </a>
                 <a href="/admin/stats" class="btn">
                     <i class="fas fa-chart-bar"></i> Статистика
@@ -1760,12 +2069,78 @@ def admin_backup():
         flash('Доступ запрещен', 'error')
         return redirect('/feed')
     
-    if create_backup():
+    backup_path = create_backup()
+    if backup_path:
         flash('✅ Резервная копия успешно создана', 'success')
     else:
         flash('❌ Ошибка создания резервной копии', 'error')
     
     return redirect('/admin')
+
+@app.route('/admin/restore', methods=['GET', 'POST'])
+@login_required
+def admin_restore():
+    if not current_user.is_admin:
+        flash('Доступ запрещен', 'error')
+        return redirect('/feed')
+    
+    if request.method == 'POST':
+        backup_filename = request.form.get('backup_filename')
+        if backup_filename and restore_backup(backup_filename):
+            flash('✅ База данных успешно восстановлена!', 'success')
+            return redirect('/admin')
+        else:
+            flash('❌ Ошибка восстановления базы данных', 'error')
+            return redirect('/admin/restore')
+    
+    backups = get_backup_list()
+    
+    backup_list_html = ''
+    if backups:
+        for backup in backups:
+            backup_list_html += f'''
+            <div class="backup-item">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <strong>{backup['filename']}</strong>
+                        <div style="font-size: 0.9em; color: #666;">
+                            Создан: {backup['created_at'].strftime('%d.%m.%Y %H:%M:%S')} • Размер: {backup['size']} KB
+                        </div>
+                    </div>
+                    <form method="POST" style="display: inline;">
+                        <input type="hidden" name="backup_filename" value="{backup['filename']}">
+                        <button type="submit" onclick="return confirm('ВНИМАНИЕ: Восстановление заменит текущую базу данных. Вы уверены?')" class="btn btn-success">
+                            <i class="fas fa-history"></i> Восстановить
+                        </button>
+                    </form>
+                </div>
+            </div>
+            '''
+    else:
+        backup_list_html = '<p style="color: #999; text-align: center; padding: 20px;">Резервные копии не найдены</p>'
+    
+    return render_page('Восстановление из резервной копии', f'''
+    <div class="card">
+        <h2><i class="fas fa-history"></i> Восстановление из резервной копии</h2>
+        
+        <div class="info-box">
+            <h3><i class="fas fa-exclamation-triangle"></i> ВНИМАНИЕ!</h3>
+            <p>Восстановление из резервной копии заменит текущую базу данных на выбранную версию.</p>
+            <p>Это действие нельзя отменить. Убедитесь, что выбрали правильную резервную копию.</p>
+        </div>
+        
+        <h3>Доступные резервные копии:</h3>
+        <div class="backup-list">
+            {backup_list_html}
+        </div>
+        
+        <div style="margin-top: 25px;">
+            <a href="/admin" class="btn">
+                <i class="fas fa-arrow-left"></i> Назад в админ-панель
+            </a>
+        </div>
+    </div>
+    ''')
 
 @app.route('/admin/stats')
 @login_required
@@ -1778,8 +2153,9 @@ def admin_stats():
         total_users = User.query.count()
         total_posts = Post.query.count()
         total_comments = Comment.query.count()
-        total_messages = Message.query.count()
+        total_messages = Message.query.filter_by(is_deleted=False).count()
         total_likes = Like.query.count()
+        total_reports = Report.query.count()
         
         # Статистика по дням
         import datetime as dt
@@ -1788,6 +2164,7 @@ def admin_stats():
         
         recent_users = User.query.filter(User.created_at >= week_ago).count()
         recent_posts = Post.query.filter(Post.created_at >= week_ago).count()
+        recent_reports = Report.query.filter(Report.created_at >= week_ago).count()
         
         return render_page('Статистика', f'''
         <div class="card">
@@ -1815,8 +2192,16 @@ def admin_stats():
                     <div class="stat-label">Всего лайков</div>
                 </div>
                 <div class="stat-item">
+                    <div class="stat-number">{total_reports}</div>
+                    <div class="stat-label">Всего жалоб</div>
+                </div>
+                <div class="stat-item">
                     <div class="stat-number">{recent_users}</div>
-                    <div class="stat-label">Новых за неделю</div>
+                    <div class="stat-label">Новых пользователей за неделю</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">{recent_reports}</div>
+                    <div class="stat-label">Жалоб за неделю</div>
                 </div>
             </div>
             
@@ -1857,6 +2242,9 @@ def admin_users():
                 <td>
                     <a href="/admin/user/{user.id}" class="btn btn-small">
                         <i class="fas fa-edit"></i>
+                    </a>
+                    <a href="/admin/delete_user/{user.id}" onclick="return confirm('Вы уверены, что хотите удалить этого пользователя? Это действие нельзя отменить!')" class="btn btn-small btn-danger">
+                        <i class="fas fa-trash"></i>
                     </a>
                 </td>
             </tr>
@@ -2017,10 +2405,318 @@ def admin_edit_user(user_id):
                 <a href="/admin/users" class="btn btn-danger">
                     <i class="fas fa-times"></i> Отмена
                 </a>
+                <a href="/admin/delete_user/{user.id}" onclick="return confirm('Вы уверены, что хотите удалить этого пользователя? Это действие нельзя отменить!')" class="btn btn-danger">
+                    <i class="fas fa-trash"></i> Удалить аккаунт
+                </a>
             </div>
         </form>
     </div>
     ''')
+
+@app.route('/admin/delete_user/<int:user_id>')
+@login_required
+def admin_delete_user(user_id):
+    if not current_user.is_admin:
+        flash('Доступ запрещен', 'error')
+        return redirect('/feed')
+    
+    if user_id == current_user.id:
+        flash('Нельзя удалить свой аккаунт', 'error')
+        return redirect('/admin/users')
+    
+    try:
+        user = User.query.get(user_id)
+        if not user:
+            flash('Пользователь не найден', 'error')
+            return redirect('/admin/users')
+        
+        # Удаляем все связанные данные пользователя
+        # (cascade='all, delete-orphan' в моделях должно позаботиться об этом)
+        
+        db.session.delete(user)
+        db.session.commit()
+        
+        flash(f'✅ Аккаунт пользователя {user.username} удален', 'success')
+        
+    except Exception as e:
+        db.session.rollback()
+        flash(f'❌ Ошибка удаления пользователя: {str(e)}', 'error')
+    
+    return redirect('/admin/users')
+
+@app.route('/admin/reports')
+@login_required
+def admin_reports():
+    if not current_user.is_admin:
+        flash('Доступ запрещен', 'error')
+        return redirect('/feed')
+    
+    try:
+        status_filter = request.args.get('status', 'pending')
+        
+        if status_filter == 'all':
+            reports = Report.query.order_by(Report.created_at.desc()).all()
+        else:
+            reports = Report.query.filter_by(status=status_filter).order_by(Report.created_at.desc()).all()
+        
+        reports_html = ''
+        for report in reports:
+            reporter = User.query.get(report.reporter_id)
+            reported = User.query.get(report.reported_id)
+            
+            post_info = ''
+            if report.post_id:
+                post = Post.query.get(report.post_id)
+                if post:
+                    post_info = f'<a href="/feed">Пост #{post.id}</a>'
+            
+            message_info = ''
+            if report.message_id:
+                message = Message.query.get(report.message_id)
+                if message:
+                    message_info = f'<a href="/messages/{message.sender_id}">Сообщение #{message.id}</a>'
+            
+            status_badge = ''
+            if report.status == 'pending':
+                status_badge = '<span style="background: #ffc107; color: #000; padding: 3px 8px; border-radius: 10px; font-size: 0.8em;">Ожидает</span>'
+            elif report.status == 'reviewed':
+                status_badge = '<span style="background: #17a2b8; color: white; padding: 3px 8px; border-radius: 10px; font-size: 0.8em;">Рассмотрено</span>'
+            elif report.status == 'resolved':
+                status_badge = '<span style="background: #28a745; color: white; padding: 3px 8px; border-radius: 10px; font-size: 0.8em;">Решено</span>'
+            elif report.status == 'rejected':
+                status_badge = '<span style="background: #dc3545; color: white; padding: 3px 8px; border-radius: 10px; font-size: 0.8em;">Отклонено</span>'
+            
+            reports_html += f'''
+            <tr>
+                <td>{report.id}</td>
+                <td>
+                    <a href="/profile/{reporter.id}">{reporter.first_name} {reporter.last_name}</a><br>
+                    <small>@{reporter.username}</small>
+                </td>
+                <td>
+                    <a href="/profile/{reported.id}">{reported.first_name} {reported.last_name}</a><br>
+                    <small>@{reported.username}</small>
+                </td>
+                <td>{post_info} {message_info}</td>
+                <td>{report.reason}</td>
+                <td>{report.created_at.strftime('%d.%m.%Y %H:%M')}</td>
+                <td>{status_badge}</td>
+                <td>
+                    <div style="display: flex; gap: 5px;">
+                        <a href="/admin/report/{report.id}" class="btn btn-small">
+                            <i class="fas fa-eye"></i>
+                        </a>
+                        <a href="/admin/resolve_report/{report.id}" class="btn btn-small btn-success">
+                            <i class="fas fa-check"></i>
+                        </a>
+                        <a href="/admin/reject_report/{report.id}" class="btn btn-small btn-danger">
+                            <i class="fas fa-times"></i>
+                        </a>
+                    </div>
+                </td>
+            </tr>
+            '''
+        
+        return render_page('Управление жалобами', f'''
+        <div class="card">
+            <h2><i class="fas fa-flag"></i> Управление жалобами</h2>
+            
+            <div style="display: flex; gap: 15px; margin-bottom: 25px; flex-wrap: wrap;">
+                <a href="/admin/reports?status=pending" class="btn {'btn-warning' if status_filter == 'pending' else ''}">
+                    <i class="fas fa-clock"></i> Ожидающие ({Report.query.filter_by(status='pending').count()})
+                </a>
+                <a href="/admin/reports?status=reviewed" class="btn {'btn-info' if status_filter == 'reviewed' else ''}">
+                    <i class="fas fa-eye"></i> Рассмотренные ({Report.query.filter_by(status='reviewed').count()})
+                </a>
+                <a href="/admin/reports?status=resolved" class="btn {'btn-success' if status_filter == 'resolved' else ''}">
+                    <i class="fas fa-check"></i> Решенные ({Report.query.filter_by(status='resolved').count()})
+                </a>
+                <a href="/admin/reports?status=rejected" class="btn {'btn-danger' if status_filter == 'rejected' else ''}">
+                    <i class="fas fa-times"></i> Отклоненные ({Report.query.filter_by(status='rejected').count()})
+                </a>
+                <a href="/admin/reports?status=all" class="btn {'btn-admin' if status_filter == 'all' else ''}">
+                    <i class="fas fa-list"></i> Все ({Report.query.count()})
+                </a>
+            </div>
+            
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Отправитель</th>
+                        <th>На кого</th>
+                        <th>Контент</th>
+                        <th>Причина</th>
+                        <th>Дата</th>
+                        <th>Статус</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {reports_html if reports_html else '''
+                    <tr>
+                        <td colspan="8" style="text-align: center; padding: 40px; color: #999;">
+                            <i class="fas fa-flag" style="font-size: 2em; margin-bottom: 15px;"></i>
+                            <p>Жалобы не найдены</p>
+                        </td>
+                    </tr>
+                    '''}
+                </tbody>
+            </table>
+        </div>
+        ''')
+        
+    except Exception as e:
+        flash(f'Ошибка загрузки жалоб: {str(e)}', 'error')
+        return redirect('/admin')
+
+@app.route('/admin/report/<int:report_id>')
+@login_required
+def admin_view_report(report_id):
+    if not current_user.is_admin:
+        flash('Доступ запрещен', 'error')
+        return redirect('/feed')
+    
+    report = Report.query.get(report_id)
+    if not report:
+        flash('Жалоба не найдена', 'error')
+        return redirect('/admin/reports')
+    
+    reporter = User.query.get(report.reporter_id)
+    reported = User.query.get(report.reported_id)
+    
+    post_content = ''
+    if report.post_id:
+        post = Post.query.get(report.post_id)
+        if post:
+            post_content = get_emoji_html(post.content)
+    
+    message_content = ''
+    if report.message_id:
+        message = Message.query.get(report.message_id)
+        if message:
+            message_content = get_emoji_html(message.content)
+    
+    return render_page(f'Жалоба #{report.id}', f'''
+    <div class="card">
+        <h2><i class="fas fa-flag"></i> Жалоба #{report.id}</h2>
+        
+        <div class="info-box">
+            <h3>Информация о жалобе</h3>
+            <p><strong>Статус:</strong> {report.status}</p>
+            <p><strong>Дата создания:</strong> {report.created_at.strftime('%d.%m.%Y %H:%M:%S')}</p>
+            {f'<p><strong>Дата рассмотрения:</strong> {report.reviewed_at.strftime("%d.%m.%Y %H:%M:%S")}</p>' if report.reviewed_at else ''}
+            {f'<p><strong>Заметки администратора:</strong> {report.admin_notes}</p>' if report.admin_notes else ''}
+        </div>
+        
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 25px; margin: 25px 0;">
+            <div style="background: rgba(248,249,250,0.9); padding: 20px; border-radius: 15px;">
+                <h4><i class="fas fa-user"></i> Отправитель жалобы</h4>
+                <p><strong>Имя:</strong> {reporter.first_name} {reporter.last_name}</p>
+                <p><strong>Псевдоним:</strong> @{reporter.username}</p>
+                <p><strong>Email:</strong> {reporter.email}</p>
+                <a href="/profile/{reporter.id}" class="btn btn-small">
+                    <i class="fas fa-eye"></i> Профиль
+                </a>
+            </div>
+            
+            <div style="background: rgba(248,249,250,0.9); padding: 20px; border-radius: 15px;">
+                <h4><i class="fas fa-user"></i> Обвиняемый</h4>
+                <p><strong>Имя:</strong> {reported.first_name} {reported.last_name}</p>
+                <p><strong>Псевдоним:</strong> @{reported.username}</p>
+                <p><strong>Email:</strong> {reported.email}</p>
+                <p><strong>Статус:</strong> {'✅ Активен' if not reported.is_banned else '❌ Заблокирован'}</p>
+                <a href="/profile/{reported.id}" class="btn btn-small">
+                    <i class="fas fa-eye"></i> Профиль
+                </a>
+            </div>
+        </div>
+        
+        <div class="info-box">
+            <h3>Причина жалобы</h3>
+            <p>{report.reason}</p>
+        </div>
+        
+        {f'''
+        <div class="info-box">
+            <h3><i class="fas fa-newspaper"></i> Пост</h3>
+            <p>{post_content}</p>
+            <a href="/feed" class="btn btn-small">
+                <i class="fas fa-eye"></i> Перейти к посту
+            </a>
+        </div>
+        ''' if post_content else ''}
+        
+        {f'''
+        <div class="info-box">
+            <h3><i class="fas fa-envelope"></i> Сообщение</h3>
+            <p>{message_content}</p>
+        </div>
+        ''' if message_content else ''}
+        
+        <div style="display: flex; gap: 15px; margin-top: 25px;">
+            <a href="/admin/resolve_report/{report.id}" onclick="return confirm('Пометить жалобу как решенную?')" class="btn btn-success">
+                <i class="fas fa-check"></i> Решено
+            </a>
+            <a href="/admin/reject_report/{report.id}" onclick="return confirm('Отклонить жалобу?')" class="btn btn-danger">
+                <i class="fas fa-times"></i> Отклонить
+            </a>
+            <a href="/admin/reports" class="btn">
+                <i class="fas fa-arrow-left"></i> Назад
+            </a>
+        </div>
+    </div>
+    ''')
+
+@app.route('/admin/resolve_report/<int:report_id>')
+@login_required
+def admin_resolve_report(report_id):
+    if not current_user.is_admin:
+        flash('Доступ запрещен', 'error')
+        return redirect('/feed')
+    
+    try:
+        report = Report.query.get(report_id)
+        if not report:
+            flash('Жалоба не найдена', 'error')
+            return redirect('/admin/reports')
+        
+        report.status = 'resolved'
+        report.reviewed_at = datetime.utcnow()
+        
+        db.session.commit()
+        flash('✅ Жалоба помечена как решенная', 'success')
+        
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Ошибка: {str(e)}', 'error')
+    
+    return redirect('/admin/reports')
+
+@app.route('/admin/reject_report/<int:report_id>')
+@login_required
+def admin_reject_report(report_id):
+    if not current_user.is_admin:
+        flash('Доступ запрещен', 'error')
+        return redirect('/feed')
+    
+    try:
+        report = Report.query.get(report_id)
+        if not report:
+            flash('Жалоба не найдена', 'error')
+            return redirect('/admin/reports')
+        
+        report.status = 'rejected'
+        report.reviewed_at = datetime.utcnow()
+        
+        db.session.commit()
+        flash('✅ Жалоба отклонена', 'success')
+        
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Ошибка: {str(e)}', 'error')
+    
+    return redirect('/admin/reports')
 
 # ========== СТАТИЧЕСКИЕ ФАЙЛЫ ==========
 @app.route('/static/uploads/<filename>')
