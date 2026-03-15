@@ -11,26 +11,26 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 import telegram
-from telegram.ext import Updater, MessageHandler, Filters, CommandHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 # Конфигурация
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-here'  # изменить в продакшене
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-key-12345')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///mateugram.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
 
-# Почта (заменить на свои данные)
+# Почта (заменить на свои данные или использовать переменные окружения)
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USERNAME'] = 'your-email@gmail.com'
-app.config['MAIL_PASSWORD'] = 'your-app-password'
-app.config['MAIL_DEFAULT_SENDER'] = 'your-email@gmail.com'
+app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME', 'your-email@gmail.com')
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD', 'your-app-password')
+app.config['MAIL_DEFAULT_SENDER'] = app.config['MAIL_USERNAME']
 
 # Telegram Bot
-BOT_TOKEN = '8665436338:AAEXVX6UatwMDBW7zb70no2aFmxp0i343Nc'
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8665436338:AAEXVX6UatwMDBW7zb70no2aFmxp0i343Nc')
 bot = telegram.Bot(token=BOT_TOKEN)
 
 # Расширения
@@ -117,13 +117,6 @@ def send_verification_email(user):
                   recipients=[user.email])
     msg.body = f'Ваш код подтверждения: {user.verification_code}'
     mail.send(msg)
-
-def send_verification_telegram(user):
-    try:
-        bot.send_message(chat_id=user.telegram_id,
-                         text=f'Ваш код подтверждения для MateuGram: {user.verification_code}')
-    except Exception as e:
-        print(f"Telegram send error: {e}")
 
 # Маршрут для статических файлов из папки photos
 @app.route('/photos/<filename>')
@@ -229,11 +222,6 @@ def register():
             if not phone or User.query.filter_by(phone=phone).first():
                 flash('Телефон некорректен или уже используется')
                 return redirect(url_for('register'))
-            # Для упрощения будем использовать phone как идентификатор для Telegram-бота,
-            # но на самом деле нужно получить telegram_id от пользователя через бота.
-            # В реальном проекте здесь должен быть запрос к боту. Упростим: сохраняем phone,
-            # а позже пользователь отправит код боту, и мы свяжем аккаунт по номеру.
-            # Но для демо используем телефон как временный идентификатор.
 
         user = User(
             first_name=first_name,
@@ -256,12 +244,7 @@ def register():
         if verification_method == 'email':
             send_verification_email(user)
         else:
-            # В реальном проекте нужно получить telegram_id от пользователя.
-            # Здесь мы просто сохраняем код в сессии и будем ждать сообщения от бота.
-            # Для демо отправим код через бота на указанный номер? Но бот не может отправить на номер.
-            # Поэтому создадим отдельный маршрут, где пользователь вводит код.
-            # А бот будет слушать сообщения и проверять код.
-            # Пока просто проинформируем.
+            # Для Telegram просто показываем сообщение, что нужно написать боту
             flash('Код подтверждения отправлен в Telegram. Напишите боту @... с этим кодом.')
 
         session['user_id'] = user.id
@@ -967,30 +950,31 @@ def handle_message(data):
 
 # Запуск Telegram-бота в отдельном потоке
 def telegram_bot():
-    from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+    async def start(update, context):
+        await update.message.reply_text('Добро пожаловать в MateuGram! Отправьте код подтверждения, если вы регистрируетесь.')
 
-    def start(update, context):
-        update.message.reply_text('Добро пожаловать в MateuGram! Отправьте код подтверждения, если вы регистрируетесь.')
-
-    def handle_message(update, context):
+    async def handle_message(update, context):
         text = update.message.text
         user_id = update.message.chat_id
         # Ищем пользователя с таким verification_code и не verified
-        user = User.query.filter_by(verification_code=text, verified=False).first()
-        if user:
-            user.verified = True
-            user.telegram_id = str(user_id)
-            db.session.commit()
-            update.message.reply_text('Ваш аккаунт подтверждён! Можете войти на сайт.')
-        else:
-            update.message.reply_text('Неверный код. Попробуйте ещё раз.')
+        with app.app_context():
+            user = User.query.filter_by(verification_code=text, verified=False).first()
+            if user:
+                user.verified = True
+                user.telegram_id = str(user_id)
+                db.session.commit()
+                await update.message.reply_text('Ваш аккаунт подтверждён! Можете войти на сайт.')
+            else:
+                await update.message.reply_text('Неверный код. Попробуйте ещё раз.')
 
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-    dp.add_handler(CommandHandler('start', start))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-    updater.start_polling()
-    updater.idle()
+    # Создаём приложение
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Запускаем бота (блокирующий вызов)
+    application.run_polling()
 
 # Запуск бота в фоне
 threading.Thread(target=telegram_bot, daemon=True).start()
@@ -998,9 +982,7 @@ threading.Thread(target=telegram_bot, daemon=True).start()
 # Создание таблиц БД
 with app.app_context():
     db.create_all()
-    # Создаём папку uploads, если нет
-    if not os.path.exists('uploads'):
-        os.makedirs('uploads')
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True, allow_unsafe_werkzeug=True)
+    port = int(os.environ.get('PORT', 5000))
+    socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
