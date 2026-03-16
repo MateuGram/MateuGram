@@ -1,14 +1,17 @@
 import os
-import threading
-import random
-import string
-from datetime import datetime
 import sys
+
+# Подмена sqlite3 на pysqlite3, если встроенный отсутствует (для хостинга)
 try:
     import pysqlite3
     sys.modules['sqlite3'] = pysqlite3
 except ImportError:
     pass
+
+import threading
+import random
+import string
+from datetime import datetime
 from flask import Flask, render_template_string, request, redirect, url_for, flash, session, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
@@ -16,28 +19,22 @@ from flask_mail import Mail, Message
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
-import telegram
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 # Конфигурация
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-key-12345')
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///mateugram.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////tmp/mateugram.db'  # для хостинга
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['UPLOAD_FOLDER'] = '/tmp/uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
 
-# Почта (заменить на свои данные или использовать переменные окружения)
-app.config['MAIL_SERVER'] = 'smtp.gmail.com'
-app.config['MAIL_PORT'] = 587
-app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME', 'your-email@gmail.com')
-app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD', 'your-app-password')
+# Настройки почты для mail.ru
+app.config['MAIL_SERVER'] = 'smtp.mail.ru'
+app.config['MAIL_PORT'] = 465
+app.config['MAIL_USE_SSL'] = True
+app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')  # ваш email@mail.ru
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')  # пароль или пароль приложения
 app.config['MAIL_DEFAULT_SENDER'] = app.config['MAIL_USERNAME']
-
-# Telegram Bot
-BOT_TOKEN = os.getenv('BOT_TOKEN', '8665436338:AAEXVX6UatwMDBW7zb70no2aFmxp0i343Nc')
-bot = telegram.Bot(token=BOT_TOKEN)
 
 # Расширения
 db = SQLAlchemy(app)
@@ -46,7 +43,7 @@ socketio = SocketIO(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
-# Создание папок для загрузок, если их нет
+# Создание папок для загрузок
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs('photos', exist_ok=True)
 
@@ -58,14 +55,11 @@ class User(UserMixin, db.Model):
     last_name = db.Column(db.String(80))
     birth_day = db.Column(db.Integer)
     birth_month = db.Column(db.Integer)
-    email = db.Column(db.String(120), unique=True)
-    phone = db.Column(db.String(20), unique=True)
+    email = db.Column(db.String(120), unique=True, nullable=False)  # теперь обязательно
     password_hash = db.Column(db.String(200))
     avatar = db.Column(db.String(200), default='default.jpg')
     verified = db.Column(db.Boolean, default=False)
     verification_code = db.Column(db.String(6))
-    verification_method = db.Column(db.String(10))  # 'email' or 'telegram'
-    telegram_id = db.Column(db.String(50))  # для подтверждения через Telegram
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def set_password(self, password):
@@ -85,7 +79,7 @@ class ChatMember(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
     chat_id = db.Column(db.Integer, db.ForeignKey('chat.id'))
-    role = db.Column(db.String(20), default='member')  # 'admin', 'member', 'owner'
+    role = db.Column(db.String(20), default='member')
     joined_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class Message(db.Model):
@@ -101,7 +95,7 @@ class Reaction(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     message_id = db.Column(db.Integer, db.ForeignKey('message.id'))
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    reaction = db.Column(db.String(10))  # emoji
+    reaction = db.Column(db.String(10))
 
 class Comment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -128,6 +122,11 @@ def send_verification_email(user):
 @app.route('/photos/<filename>')
 def photos(filename):
     return send_from_directory('photos', filename)
+
+# Маршрут для загруженных аватарок
+@app.route('/uploads/<filename>')
+def uploads(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 # Главная страница
 @app.route('/')
@@ -205,11 +204,9 @@ def register():
         username = request.form['username']
         birth_day = request.form.get('birth_day', type=int)
         birth_month = request.form.get('birth_month', type=int)
-        email = request.form.get('email')
-        phone = request.form.get('phone')
+        email = request.form['email']
         password = request.form['password']
         confirm = request.form['confirm_password']
-        verification_method = request.form['verification_method']  # 'email' or 'telegram'
 
         # Проверки
         if password != confirm:
@@ -220,14 +217,9 @@ def register():
             flash('Имя пользователя занято')
             return redirect(url_for('register'))
 
-        if verification_method == 'email':
-            if not email or User.query.filter_by(email=email).first():
-                flash('Email некорректен или уже используется')
-                return redirect(url_for('register'))
-        else:  # telegram
-            if not phone or User.query.filter_by(phone=phone).first():
-                flash('Телефон некорректен или уже используется')
-                return redirect(url_for('register'))
+        if not email or User.query.filter_by(email=email).first():
+            flash('Email некорректен или уже используется')
+            return redirect(url_for('register'))
 
         user = User(
             first_name=first_name,
@@ -235,9 +227,7 @@ def register():
             username=username,
             birth_day=birth_day,
             birth_month=birth_month,
-            email=email if verification_method == 'email' else None,
-            phone=phone if verification_method == 'telegram' else None,
-            verification_method=verification_method,
+            email=email,
             verification_code=generate_verification_code(),
             verified=False
         )
@@ -246,14 +236,11 @@ def register():
         db.session.add(user)
         db.session.commit()
 
-        # Отправка кода
-        if verification_method == 'email':
-            send_verification_email(user)
-        else:
-            # Для Telegram просто показываем сообщение, что нужно написать боту
-            flash('Код подтверждения отправлен в Telegram. Напишите боту @... с этим кодом.')
+        # Отправка кода на почту
+        send_verification_email(user)
 
         session['user_id'] = user.id
+        flash('Код подтверждения отправлен на вашу почту')
         return redirect(url_for('verify'))
 
     return render_template_string('''
@@ -283,7 +270,7 @@ def register():
                 h2 { color: #333; margin-bottom: 20px; text-align: center; }
                 .form-group { margin-bottom: 15px; }
                 label { display: block; margin-bottom: 5px; color: #555; font-weight: 500; }
-                input, select {
+                input {
                     width: 100%;
                     padding: 12px;
                     border: 1px solid #ddd;
@@ -319,17 +306,6 @@ def register():
                     color: #667eea;
                     text-decoration: none;
                 }
-                .verification-options {
-                    display: flex;
-                    gap: 20px;
-                    margin-bottom: 20px;
-                }
-                .verification-options label {
-                    display: flex;
-                    align-items: center;
-                    gap: 5px;
-                    font-weight: normal;
-                }
             </style>
         </head>
         <body>
@@ -359,19 +335,8 @@ def register():
                         </div>
                     </div>
                     <div class="form-group">
-                        <label>Способ подтверждения</label>
-                        <div class="verification-options">
-                            <label><input type="radio" name="verification_method" value="email" checked> Почта</label>
-                            <label><input type="radio" name="verification_method" value="telegram"> Telegram</label>
-                        </div>
-                    </div>
-                    <div class="form-group" id="email-field">
-                        <label>Email</label>
-                        <input type="email" name="email">
-                    </div>
-                    <div class="form-group" id="phone-field" style="display:none;">
-                        <label>Номер телефона</label>
-                        <input type="tel" name="phone">
+                        <label>Email*</label>
+                        <input type="email" name="email" required>
                     </div>
                     <div class="form-group">
                         <label>Пароль*</label>
@@ -387,31 +352,11 @@ def register():
                     Уже есть аккаунт? <a href="/login">Войти</a>
                 </div>
             </div>
-            <script>
-                const methodRadios = document.querySelectorAll('input[name="verification_method"]');
-                const emailField = document.getElementById('email-field');
-                const phoneField = document.getElementById('phone-field');
-                methodRadios.forEach(radio => {
-                    radio.addEventListener('change', function() {
-                        if (this.value === 'email') {
-                            emailField.style.display = 'block';
-                            phoneField.style.display = 'none';
-                            document.querySelector('input[name="email"]').required = true;
-                            document.querySelector('input[name="phone"]').required = false;
-                        } else {
-                            emailField.style.display = 'none';
-                            phoneField.style.display = 'block';
-                            document.querySelector('input[name="email"]').required = false;
-                            document.querySelector('input[name="phone"]').required = true;
-                        }
-                    });
-                });
-            </script>
         </body>
         </html>
     ''')
 
-# Подтверждение
+# Подтверждение email
 @app.route('/verify', methods=['GET', 'POST'])
 def verify():
     if 'user_id' not in session:
@@ -449,7 +394,7 @@ def verify():
             <div class="container">
                 <h2>Подтверждение</h2>
                 <div class="info">
-                    Код отправлен на {{ 'email' if user.verification_method == 'email' else 'Telegram' }}.
+                    Код отправлен на вашу почту {{ user.email }}
                 </div>
                 <form method="POST">
                     <input type="text" name="code" placeholder="6-значный код" maxlength="6" pattern="\\d{6}" required>
@@ -495,7 +440,7 @@ def setup_profile():
             <div class="container">
                 <h2>Завершение регистрации</h2>
                 <p>Выберите аватар или пропустите</p>
-                <img src="/uploads/{{ current_user.avatar if current_user.avatar != 'default.jpg' else '/photos/default.jpg' }}" class="avatar-preview" id="preview">
+                <img src="{{ url_for('uploads', filename=current_user.avatar) if current_user.avatar != 'default.jpg' else '/photos/default.jpg' }}" class="avatar-preview" id="preview">
                 <form method="POST" enctype="multipart/form-data">
                     <label for="avatar" class="file-label">Выбрать файл</label>
                     <input type="file" name="avatar" id="avatar" accept="image/*">
@@ -678,16 +623,12 @@ def profile():
         </head>
         <body>
             <div class="container">
-                <img src="/uploads/{{ current_user.avatar if current_user.avatar != 'default.jpg' else '/photos/default.jpg' }}" class="avatar">
+                <img src="{{ url_for('uploads', filename=current_user.avatar) if current_user.avatar != 'default.jpg' else '/photos/default.jpg' }}" class="avatar">
                 <h2>{{ current_user.first_name }} {{ current_user.last_name }}</h2>
                 <div class="username">@{{ current_user.username }}</div>
                 <div class="info-item">
                     <div class="info-label">Email:</div>
-                    <div class="info-value">{{ current_user.email or 'не указан' }}</div>
-                </div>
-                <div class="info-item">
-                    <div class="info-label">Телефон:</div>
-                    <div class="info-value">{{ current_user.phone or 'не указан' }}</div>
+                    <div class="info-value">{{ current_user.email }}</div>
                 </div>
                 <div class="info-item">
                     <div class="info-label">День рождения:</div>
@@ -755,12 +696,11 @@ def logout():
     logout_user()
     return redirect(url_for('index'))
 
-# Пример чата (real-time через SocketIO)
+# Чат (real-time через SocketIO)
 @app.route('/chat/<int:chat_id>')
 @login_required
 def chat(chat_id):
     chat = Chat.query.get_or_404(chat_id)
-    # Проверка, что пользователь участник
     membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=chat_id).first()
     if not membership:
         flash('Вы не участник этого чата')
@@ -953,37 +893,6 @@ def handle_message(data):
         'sender_name': sender.first_name,
         'chat_id': chat_id
     }, room=f"chat_{chat_id}")
-
-# Запуск Telegram-бота в отдельном потоке
-def telegram_bot():
-    async def start(update, context):
-        await update.message.reply_text('Добро пожаловать в MateuGram! Отправьте код подтверждения, если вы регистрируетесь.')
-
-    async def handle_message(update, context):
-        text = update.message.text
-        user_id = update.message.chat_id
-        # Ищем пользователя с таким verification_code и не verified
-        with app.app_context():
-            user = User.query.filter_by(verification_code=text, verified=False).first()
-            if user:
-                user.verified = True
-                user.telegram_id = str(user_id)
-                db.session.commit()
-                await update.message.reply_text('Ваш аккаунт подтверждён! Можете войти на сайт.')
-            else:
-                await update.message.reply_text('Неверный код. Попробуйте ещё раз.')
-
-    # Создаём приложение
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # Запускаем бота (блокирующий вызов)
-    application.run_polling()
-
-# Запуск бота в фоне
-threading.Thread(target=telegram_bot, daemon=True).start()
 
 # Создание таблиц БД
 with app.app_context():
