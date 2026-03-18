@@ -883,17 +883,471 @@ NEW_CHAT_TEMPLATE = '''
 '''
 
 # -------------------- Чат (с изменённой кнопкой звонка) --------------------
-# Здесь для краткости приведён только фрагмент с кнопкой звонка.
-# Полный код чата можно взять из предыдущей версии, заменив блок call-buttons на:
-# <div class="call-buttons">
-#     {% if is_private and other_user %}
-#         <a href="https://voice.mateugram.onrender.com/room/create?user={{ current_user.username }}" target="_blank" class="call-btn" title="Позвонить через MateuGram Voice">📞</a>
-#     {% endif %}
-# </div>
-# Также нужно добавить в head: <link rel="icon" type="image/png" href="/photos/logo.png">
+@app.route('/chat/<int:chat_id>')
+@login_required
+def chat(chat_id):
+    chat = Chat.query.get_or_404(chat_id)
+    membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=chat_id).first()
+    if not membership:
+        flash('Вы не участник этого чата')
+        return redirect(url_for('chats'))
+    messages = Message.query.filter_by(chat_id=chat_id).order_by(Message.created_at).all()
+    pinned = Message.query.filter_by(chat_id=chat_id, pinned=True).first()
+    # Определяем, личный ли чат (для звонков)
+    is_private = not chat.is_group and not chat.is_channel
+    other_user = None
+    if is_private:
+        members = User.query.join(ChatMember, ChatMember.user_id == User.id).filter(ChatMember.chat_id == chat.id).all()
+        for m in members:
+            if m.id != current_user.id:
+                other_user = m
+                break
+    return render_template_string(CHAT_TEMPLATE, chat=chat, messages=messages, pinned=pinned,
+                                  User=User, current_user=current_user, get_chat_name=get_chat_name,
+                                  membership=membership, is_private=is_private, other_user=other_user)
 
-# Остальные маршруты (профиль, настройки, вход и т.д.) сохраняются как в предыдущей полной версии.
-# Для полноты их необходимо добавить, но в целях экономии места здесь они опущены.
+CHAT_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Чат</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" type="image/png" href="/photos/logo.png">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', sans-serif; }
+        body { background: #f0f4fa; height: 100vh; display: flex; flex-direction: column; }
+        .chat-header {
+            background: white;
+            padding: 15px 25px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+        .chat-header .back {
+            font-size: 28px;
+            color: #2c6b9e;
+            text-decoration: none;
+        }
+        .chat-header h2 { color: #0b2b5c; font-size: 1.5em; }
+        .call-buttons {
+            display: flex;
+            gap: 10px;
+            margin-left: auto;
+        }
+        .call-btn {
+            background: #2c6b9e;
+            color: white;
+            border: none;
+            width: 45px;
+            height: 45px;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 20px;
+            transition: 0.2s;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .call-btn:hover { background: #1e4a7a; transform: scale(1.1); }
+        .search-box {
+            margin: 10px 25px;
+            display: flex;
+        }
+        .search-box input {
+            flex: 1;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 30px 0 0 30px;
+            outline: none;
+            font-size: 14px;
+        }
+        .search-box button {
+            background: #2c6b9e;
+            color: white;
+            border: none;
+            padding: 0 20px;
+            border-radius: 0 30px 30px 0;
+            cursor: pointer;
+        }
+        .pinned-message {
+            background: #fff3cd;
+            margin: 10px 25px;
+            padding: 12px 20px;
+            border-radius: 30px;
+            display: flex;
+            justify-content: space-between;
+            border: 1px solid #ffe58c;
+        }
+        .messages-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px 25px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .message {
+            max-width: 70%;
+            padding: 12px 18px;
+            border-radius: 25px;
+            position: relative;
+            word-wrap: break-word;
+            animation: fadeIn 0.2s;
+        }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+        .message.sent {
+            background: linear-gradient(145deg, #0b2b5c, #2c6b9e);
+            color: white;
+            align-self: flex-end;
+            border-bottom-right-radius: 5px;
+        }
+        .message.received {
+            background: white;
+            color: #1a202c;
+            align-self: flex-start;
+            border-bottom-left-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        }
+        .message .sender { font-size: 12px; font-weight: bold; margin-bottom: 4px; }
+        .message.sent .sender { color: #ddd; }
+        .message .time { font-size: 10px; margin-top: 5px; text-align: right; opacity: 0.7; }
+        .reply-info, .forward-info { font-size: 11px; background: rgba(0,0,0,0.05); padding: 4px 8px; border-radius: 12px; margin-bottom: 5px; }
+        .file-attachment {
+            margin-top: 8px;
+            padding: 8px;
+            background: rgba(255,255,255,0.2);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+        }
+        .file-attachment a { color: inherit; text-decoration: none; }
+        .reactions {
+            display: flex;
+            gap: 5px;
+            margin-top: 8px;
+            flex-wrap: wrap;
+        }
+        .reaction {
+            background: rgba(0,0,0,0.1);
+            border-radius: 20px;
+            padding: 2px 10px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .message-actions {
+            display: flex;
+            gap: 15px;
+            margin-top: 8px;
+            font-size: 12px;
+            color: #2c6b9e;
+            cursor: pointer;
+        }
+        .input-area {
+            background: white;
+            padding: 15px 25px;
+            display: flex;
+            gap: 12px;
+            border-top: 1px solid #e2e8f0;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .input-area input[type="text"] {
+            flex: 1;
+            padding: 14px 20px;
+            border: 2px solid #e2e8f0;
+            border-radius: 40px;
+            font-size: 15px;
+            outline: none;
+            transition: 0.2s;
+        }
+        .input-area input[type="text"]:focus { border-color: #2c6b9e; }
+        .input-area button {
+            background: linear-gradient(145deg, #0b2b5c, #2c6b9e);
+            color: white;
+            border: none;
+            width: 55px;
+            height: 55px;
+            border-radius: 50%;
+            font-size: 22px;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .input-area button:hover { transform: scale(1.05); }
+        .input-area .file-label {
+            background: #e6f0fa;
+            color: #0b2b5c;
+            padding: 14px 20px;
+            border-radius: 40px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        .input-area input[type="file"] { display: none; }
+        .reply-context, .edit-context {
+            width: 100%;
+            background: #e6f0fa;
+            padding: 12px 20px;
+            border-radius: 30px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .close { cursor: pointer; font-weight: bold; color: #2c6b9e; }
+        .flash { background-color: #fed7d7; color: #c53030; padding: 10px 20px; border-radius: 30px; margin: 10px 25px; }
+    </style>
+</head>
+<body>
+    <div class="chat-header">
+        <a href="/chats" class="back">←</a>
+        <h2>{{ get_chat_name(chat) }}</h2>
+        <div class="call-buttons">
+            {% if is_private and other_user %}
+                <a href="https://voice.mateugram.onrender.com/room/create?user={{ current_user.username }}" target="_blank" class="call-btn" title="Позвонить через MateuGram Voice">📞</a>
+            {% endif %}
+        </div>
+        <a href="/chat/{{ chat.id }}/info" style="margin-left: auto; color: #2c6b9e; font-size: 24px;">ℹ️</a>
+    </div>
+
+    <div class="search-box">
+        <input type="text" id="search-input" placeholder="Поиск по сообщениям...">
+        <button onclick="searchMessages()">🔍</button>
+    </div>
+
+    {% if pinned %}
+    <div class="pinned-message">
+        <span>📌 {{ pinned.content[:60] }}</span>
+        <a href="#msg-{{ pinned.id }}">Перейти</a>
+    </div>
+    {% endif %}
+
+    <div class="messages-container" id="messages">
+        {% with messages = get_flashed_messages() %}
+          {% if messages %}
+            {% for message in messages %}
+              <div class="flash">{{ message }}</div>
+            {% endfor %}
+          {% endif %}
+        {% endwith %}
+        {% for msg in messages %}
+            {% set sender = User.query.get(msg.sender_id) %}
+            <div class="message {{ 'sent' if msg.sender_id == current_user.id else 'received' }}" data-id="{{ msg.id }}" id="msg-{{ msg.id }}">
+                {% if msg.sender_id != current_user.id %}
+                    <div class="sender">{{ sender.first_name }}</div>
+                {% endif %}
+                {% if msg.reply_to %}
+                    {% set parent = Message.query.get(msg.reply_to) %}
+                    {% if parent %}
+                        <div class="reply-info">В ответ на: {{ parent.content[:30] }}{% if parent.content|length > 30 %}…{% endif %}</div>
+                    {% endif %}
+                {% endif %}
+                {% if msg.forwarded_from %}
+                    <div class="forward-info">Переслано</div>
+                {% endif %}
+                <div>{{ msg.content }}</div>
+                {% if msg.edited %}<span style="font-size: 10px;">(ред.)</span>{% endif %}
+                {% if msg.file_path %}
+                    <div class="file-attachment">
+                        <a href="{{ url_for('uploads', filename=msg.file_path.split('/')[-1]) }}" target="_blank">
+                            📎 {{ msg.file_name }}
+                        </a>
+                    </div>
+                {% endif %}
+                <div class="time">{{ msg.created_at.strftime('%H:%M') }}</div>
+                <div class="reactions" id="reactions-{{ msg.id }}">
+                    {% for r in msg.reactions %}
+                        <span class="reaction" onclick="addReaction({{ msg.id }}, '{{ r.reaction }}')">{{ r.reaction }}</span>
+                    {% endfor %}
+                </div>
+                <div class="message-actions">
+                    <span onclick="replyTo({{ msg.id }}, '{{ msg.content[:30] }}')">Ответить</span>
+                    <span onclick="forward({{ msg.id }})">Переслать</span>
+                    <span onclick="showComments({{ msg.id }})">Комментарии</span>
+                    {% if msg.sender_id == current_user.id %}
+                        <span onclick="editMessage({{ msg.id }}, '{{ msg.content }}')">✏️</span>
+                        <span onclick="deleteMessage({{ msg.id }})">🗑️</span>
+                    {% endif %}
+                    {% if membership.role in ['owner', 'admin'] %}
+                        <span onclick="pinMessage({{ msg.id }})">📌</span>
+                    {% endif %}
+                    <span onclick="addReaction({{ msg.id }}, '👍')">👍</span>
+                    <span onclick="addReaction({{ msg.id }}, '❤️')">❤️</span>
+                    <span onclick="addReaction({{ msg.id }}, '😮')">😮</span>
+                </div>
+            </div>
+        {% endfor %}
+    </div>
+
+    <div id="reply-indicator" style="display: none;" class="reply-context">
+        <span id="reply-text"></span>
+        <span class="close" onclick="cancelReply()">✖</span>
+    </div>
+    <div id="edit-indicator" style="display: none;" class="edit-context">
+        <span>Редактирование</span>
+        <span class="close" onclick="cancelEdit()">✖</span>
+    </div>
+
+    <div class="input-area">
+        <input type="text" id="message-input" placeholder="Напишите сообщение...">
+        <label for="file-upload" class="file-label">📎 Файл</label>
+        <input type="file" id="file-upload" name="file" onchange="uploadFile()">
+        <button id="send-btn">➤</button>
+    </div>
+
+    <script>
+        // ---------- Socket.IO ----------
+        var socket = io();
+        var chatId = {{ chat.id }};
+        var userId = {{ current_user.id }};
+        var replyToId = null;
+        var editMessageId = null;
+        var otherUserId = {{ other_user.id if other_user else 'null' }};
+
+        socket.on('connect', function() {
+            socket.emit('join', {chat_id: chatId});
+        });
+
+        // ---------- Отправка сообщений ----------
+        document.getElementById('send-btn').onclick = sendMessage;
+        document.getElementById('message-input').onkeypress = function(e) {
+            if (e.key === 'Enter') sendMessage();
+        };
+
+        function sendMessage() {
+            var input = document.getElementById('message-input');
+            var text = input.value.trim();
+            var fileInput = document.getElementById('file-upload');
+            if (editMessageId) {
+                fetch('/edit_message', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({message_id: editMessageId, content: text})
+                }).then(response => response.json())
+                  .then(data => { if (data.success) location.reload(); else alert('Ошибка'); });
+                cancelEdit();
+                return;
+            }
+            if (text || fileInput.files.length > 0) {
+                if (fileInput.files.length > 0) {
+                    var formData = new FormData();
+                    formData.append('file', fileInput.files[0]);
+                    formData.append('chat_id', chatId);
+                    formData.append('content', text);
+                    formData.append('reply_to', replyToId);
+                    fetch('/upload', { method: 'POST', body: formData })
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.success) {
+                                socket.emit('send_message', {
+                                    chat_id: chatId,
+                                    content: text,
+                                    file_path: data.file_path,
+                                    file_name: data.file_name,
+                                    file_type: data.file_type,
+                                    sender_id: userId,
+                                    reply_to: replyToId
+                                });
+                                input.value = '';
+                                fileInput.value = '';
+                                cancelReply();
+                            } else alert('Ошибка загрузки');
+                        });
+                } else {
+                    socket.emit('send_message', {
+                        chat_id: chatId,
+                        content: text,
+                        sender_id: userId,
+                        reply_to: replyToId
+                    });
+                    input.value = '';
+                    cancelReply();
+                }
+            }
+        }
+
+        socket.on('new_message', function(data) {
+            var messagesDiv = document.getElementById('messages');
+            var msgDiv = document.createElement('div');
+            msgDiv.className = 'message ' + (data.sender_id == userId ? 'sent' : 'received');
+            if (data.sender_id != userId) {
+                var senderDiv = document.createElement('div');
+                senderDiv.className = 'sender';
+                senderDiv.innerText = data.sender_name;
+                msgDiv.appendChild(senderDiv);
+            }
+            if (data.reply_to) {
+                var replyDiv = document.createElement('div');
+                replyDiv.className = 'reply-info';
+                replyDiv.innerText = 'В ответ на...';
+                msgDiv.appendChild(replyDiv);
+            }
+            var contentDiv = document.createElement('div');
+            contentDiv.innerText = data.content;
+            msgDiv.appendChild(contentDiv);
+            if (data.file_path) {
+                var fileDiv = document.createElement('div');
+                fileDiv.className = 'file-attachment';
+                fileDiv.innerHTML = `<a href="/uploads/${data.file_path.split('/').pop()}" target="_blank">📎 ${data.file_name}</a>`;
+                msgDiv.appendChild(fileDiv);
+            }
+            var timeDiv = document.createElement('div');
+            timeDiv.className = 'time';
+            timeDiv.innerText = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+            msgDiv.appendChild(timeDiv);
+            messagesDiv.appendChild(msgDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        });
+
+        // ---------- Функции сообщений ----------
+        function replyTo(msgId, preview) {
+            replyToId = msgId;
+            document.getElementById('reply-indicator').style.display = 'flex';
+            document.getElementById('reply-text').innerText = 'Ответ на: ' + preview;
+        }
+        function cancelReply() { replyToId = null; document.getElementById('reply-indicator').style.display = 'none'; }
+        function editMessage(msgId, content) {
+            editMessageId = msgId;
+            document.getElementById('message-input').value = content;
+            document.getElementById('edit-indicator').style.display = 'flex';
+        }
+        function cancelEdit() {
+            editMessageId = null;
+            document.getElementById('edit-indicator').style.display = 'none';
+            document.getElementById('message-input').value = '';
+        }
+        function deleteMessage(msgId) {
+            if (confirm('Удалить сообщение?')) {
+                fetch('/delete_message', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message_id: msgId}) })
+                    .then(response => response.json()).then(data => { if (data.success) location.reload(); });
+            }
+        }
+        function pinMessage(msgId) {
+            fetch('/pin_message', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message_id: msgId}) })
+                .then(response => response.json()).then(data => { if (data.success) location.reload(); });
+        }
+        function addReaction(msgId, emoji) {
+            fetch('/react', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message_id: msgId, reaction: emoji}) })
+                .then(response => response.json()).then(data => { if (data.success) location.reload(); });
+        }
+        function forward(msgId) {
+            var chatId = prompt('Введите ID чата для пересылки:');
+            if (chatId) {
+                fetch('/forward', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message_id: msgId, to_chat_id: chatId}) })
+                    .then(response => response.json()).then(data => { if (data.success) alert('Переслано'); else alert('Ошибка'); });
+            }
+        }
+        function showComments(msgId) { window.location.href = '/message/' + msgId + '/comments'; }
+        function searchMessages() {
+            var query = document.getElementById('search-input').value;
+            if (query) window.location.href = '/chat/' + chatId + '/search?q=' + encodeURIComponent(query);
+        }
+    </script>
+</body>
+</html>
+'''
 
 # -------------------- Запуск --------------------
 if __name__ == '__main__':
