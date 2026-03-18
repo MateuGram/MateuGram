@@ -139,6 +139,11 @@ def get_chat_name(chat):
 def generate_invite_token():
     return ''.join(random.choices(string.ascii_letters + string.digits, k=20))
 
+# -------------------- Загрузчик пользователя (ОБЯЗАТЕЛЬНО) --------------------
+@login_manager.user_loader
+def load_user(user_id):
+    return db.session.get(User, int(user_id))
+
 # -------------------- Статика и favicon --------------------
 @app.route('/photos/<filename>')
 def photos(filename):
@@ -882,7 +887,7 @@ NEW_CHAT_TEMPLATE = '''
 </html>
 '''
 
-# -------------------- Чат (с изменённой кнопкой звонка) --------------------
+# -------------------- Чат (с кнопкой звонка на Voice) --------------------
 @app.route('/chat/<int:chat_id>')
 @login_required
 def chat(chat_id):
@@ -893,7 +898,6 @@ def chat(chat_id):
         return redirect(url_for('chats'))
     messages = Message.query.filter_by(chat_id=chat_id).order_by(Message.created_at).all()
     pinned = Message.query.filter_by(chat_id=chat_id, pinned=True).first()
-    # Определяем, личный ли чат (для звонков)
     is_private = not chat.is_group and not chat.is_channel
     other_user = None
     if is_private:
@@ -1106,7 +1110,7 @@ CHAT_TEMPLATE = '''
         <h2>{{ get_chat_name(chat) }}</h2>
         <div class="call-buttons">
             {% if is_private and other_user %}
-                <a href="https://voice.mateugram.onrender.com/room/create?user={{ current_user.username }}" target="_blank" class="call-btn" title="Позвонить через MateuGram Voice">📞</a>
+                <a href="https://mateugram-voice.onrender.com/create?user={{ current_user.username }}" target="_blank" class="call-btn" title="Позвонить через MateuGram Voice">📞</a>
             {% endif %}
         </div>
         <a href="/chat/{{ chat.id }}/info" style="margin-left: auto; color: #2c6b9e; font-size: 24px;">ℹ️</a>
@@ -1198,7 +1202,6 @@ CHAT_TEMPLATE = '''
     </div>
 
     <script>
-        // ---------- Socket.IO ----------
         var socket = io();
         var chatId = {{ chat.id }};
         var userId = {{ current_user.id }};
@@ -1206,11 +1209,8 @@ CHAT_TEMPLATE = '''
         var editMessageId = null;
         var otherUserId = {{ other_user.id if other_user else 'null' }};
 
-        socket.on('connect', function() {
-            socket.emit('join', {chat_id: chatId});
-        });
+        socket.on('connect', function() { socket.emit('join', {chat_id: chatId}); });
 
-        // ---------- Отправка сообщений ----------
         document.getElementById('send-btn').onclick = sendMessage;
         document.getElementById('message-input').onkeypress = function(e) {
             if (e.key === 'Enter') sendMessage();
@@ -1221,49 +1221,29 @@ CHAT_TEMPLATE = '''
             var text = input.value.trim();
             var fileInput = document.getElementById('file-upload');
             if (editMessageId) {
-                fetch('/edit_message', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({message_id: editMessageId, content: text})
-                }).then(response => response.json())
-                  .then(data => { if (data.success) location.reload(); else alert('Ошибка'); });
+                fetch('/edit_message', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message_id:editMessageId, content:text}) })
+                    .then(response=>response.json()).then(data=>{ if(data.success) location.reload(); else alert('Ошибка'); });
                 cancelEdit();
                 return;
             }
-            if (text || fileInput.files.length > 0) {
-                if (fileInput.files.length > 0) {
+            if (text || fileInput.files.length>0) {
+                if (fileInput.files.length>0) {
                     var formData = new FormData();
                     formData.append('file', fileInput.files[0]);
                     formData.append('chat_id', chatId);
                     formData.append('content', text);
                     formData.append('reply_to', replyToId);
-                    fetch('/upload', { method: 'POST', body: formData })
-                        .then(response => response.json())
-                        .then(data => {
-                            if (data.success) {
-                                socket.emit('send_message', {
-                                    chat_id: chatId,
-                                    content: text,
-                                    file_path: data.file_path,
-                                    file_name: data.file_name,
-                                    file_type: data.file_type,
-                                    sender_id: userId,
-                                    reply_to: replyToId
-                                });
-                                input.value = '';
-                                fileInput.value = '';
-                                cancelReply();
+                    fetch('/upload', { method:'POST', body:formData })
+                        .then(response=>response.json())
+                        .then(data=>{
+                            if(data.success) {
+                                socket.emit('send_message', { chat_id:chatId, content:text, file_path:data.file_path, file_name:data.file_name, file_type:data.file_type, sender_id:userId, reply_to:replyToId });
+                                input.value=''; fileInput.value=''; cancelReply();
                             } else alert('Ошибка загрузки');
                         });
                 } else {
-                    socket.emit('send_message', {
-                        chat_id: chatId,
-                        content: text,
-                        sender_id: userId,
-                        reply_to: replyToId
-                    });
-                    input.value = '';
-                    cancelReply();
+                    socket.emit('send_message', { chat_id:chatId, content:text, sender_id:userId, reply_to:replyToId });
+                    input.value=''; cancelReply();
                 }
             }
         }
@@ -1295,61 +1275,535 @@ CHAT_TEMPLATE = '''
             }
             var timeDiv = document.createElement('div');
             timeDiv.className = 'time';
-            timeDiv.innerText = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+            timeDiv.innerText = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
             msgDiv.appendChild(timeDiv);
             messagesDiv.appendChild(msgDiv);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         });
 
-        // ---------- Функции сообщений ----------
-        function replyTo(msgId, preview) {
-            replyToId = msgId;
-            document.getElementById('reply-indicator').style.display = 'flex';
-            document.getElementById('reply-text').innerText = 'Ответ на: ' + preview;
-        }
-        function cancelReply() { replyToId = null; document.getElementById('reply-indicator').style.display = 'none'; }
-        function editMessage(msgId, content) {
-            editMessageId = msgId;
-            document.getElementById('message-input').value = content;
-            document.getElementById('edit-indicator').style.display = 'flex';
-        }
-        function cancelEdit() {
-            editMessageId = null;
-            document.getElementById('edit-indicator').style.display = 'none';
-            document.getElementById('message-input').value = '';
-        }
-        function deleteMessage(msgId) {
-            if (confirm('Удалить сообщение?')) {
-                fetch('/delete_message', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message_id: msgId}) })
-                    .then(response => response.json()).then(data => { if (data.success) location.reload(); });
-            }
-        }
-        function pinMessage(msgId) {
-            fetch('/pin_message', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message_id: msgId}) })
-                .then(response => response.json()).then(data => { if (data.success) location.reload(); });
-        }
-        function addReaction(msgId, emoji) {
-            fetch('/react', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message_id: msgId, reaction: emoji}) })
-                .then(response => response.json()).then(data => { if (data.success) location.reload(); });
-        }
-        function forward(msgId) {
-            var chatId = prompt('Введите ID чата для пересылки:');
-            if (chatId) {
-                fetch('/forward', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message_id: msgId, to_chat_id: chatId}) })
-                    .then(response => response.json()).then(data => { if (data.success) alert('Переслано'); else alert('Ошибка'); });
-            }
-        }
-        function showComments(msgId) { window.location.href = '/message/' + msgId + '/comments'; }
-        function searchMessages() {
-            var query = document.getElementById('search-input').value;
-            if (query) window.location.href = '/chat/' + chatId + '/search?q=' + encodeURIComponent(query);
-        }
+        function replyTo(msgId, preview) { replyToId = msgId; document.getElementById('reply-indicator').style.display='flex'; document.getElementById('reply-text').innerText='Ответ на: '+preview; }
+        function cancelReply() { replyToId=null; document.getElementById('reply-indicator').style.display='none'; }
+        function editMessage(msgId, content) { editMessageId=msgId; document.getElementById('message-input').value=content; document.getElementById('edit-indicator').style.display='flex'; }
+        function cancelEdit() { editMessageId=null; document.getElementById('edit-indicator').style.display='none'; document.getElementById('message-input').value=''; }
+        function deleteMessage(msgId) { if(confirm('Удалить сообщение?')) fetch('/delete_message', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message_id:msgId}) }).then(response=>response.json()).then(data=>{ if(data.success) location.reload(); }); }
+        function pinMessage(msgId) { fetch('/pin_message', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message_id:msgId}) }).then(response=>response.json()).then(data=>{ if(data.success) location.reload(); }); }
+        function addReaction(msgId, emoji) { fetch('/react', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message_id:msgId, reaction:emoji}) }).then(response=>response.json()).then(data=>{ if(data.success) location.reload(); }); }
+        function forward(msgId) { var chatId = prompt('Введите ID чата для пересылки:'); if(chatId) fetch('/forward', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message_id:msgId, to_chat_id:chatId}) }).then(response=>response.json()).then(data=>{ if(data.success) alert('Переслано'); else alert('Ошибка'); }); }
+        function showComments(msgId) { window.location.href = '/message/'+msgId+'/comments'; }
+        function searchMessages() { var query = document.getElementById('search-input').value; if(query) window.location.href = '/chat/'+chatId+'/search?q='+encodeURIComponent(query); }
     </script>
 </body>
 </html>
 '''
 
-# -------------------- Запуск --------------------
+# -------------------- Поиск сообщений --------------------
+@app.route('/chat/<int:chat_id>/search')
+@login_required
+def search_messages(chat_id):
+    query = request.args.get('q', '')
+    chat = Chat.query.get_or_404(chat_id)
+    membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=chat_id).first()
+    if not membership:
+        flash('Вы не участник этого чата')
+        return redirect(url_for('chats'))
+    messages = Message.query.filter(Message.chat_id == chat_id, Message.content.contains(query)).order_by(Message.created_at).all()
+    return render_template_string('''
+        <!DOCTYPE html>
+        <html>
+        <head><title>Поиск</title><meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { background: #f5f7fa; padding:20px; }
+            .container { max-width:800px; margin:0 auto; background:white; border-radius:30px; padding:30px; }
+            .message { padding:12px; border-bottom:1px solid #eee; }
+            .time { font-size:12px; color:#999; }
+        </style>
+        </head>
+        <body><div class="container">
+            <a href="/chat/{{ chat_id }}" style="display:block; margin-bottom:20px;">← Вернуться</a>
+            <h2>Результаты поиска: "{{ query }}"</h2>
+            {% for msg in messages %}<div class="message">{{ msg.content }} <span class="time">{{ msg.created_at.strftime('%H:%M') }}</span></div>{% else %}<p>Ничего не найдено</p>{% endfor %}
+        </div></body></html>
+    ''', messages=messages, query=query, chat_id=chat_id)
+
+# -------------------- Редактирование сообщения --------------------
+@app.route('/edit_message', methods=['POST'])
+@login_required
+def edit_message():
+    data = request.get_json()
+    msg_id = data.get('message_id')
+    new_content = data.get('content', '').strip()
+    msg = Message.query.get(msg_id)
+    if not msg or msg.sender_id != current_user.id:
+        return jsonify({'success': False})
+    msg.content = new_content
+    msg.edited = True
+    db.session.commit()
+    return jsonify({'success': True})
+
+# -------------------- Удаление сообщения --------------------
+@app.route('/delete_message', methods=['POST'])
+@login_required
+def delete_message():
+    data = request.get_json()
+    msg_id = data.get('message_id')
+    msg = Message.query.get(msg_id)
+    if not msg:
+        return jsonify({'success': False})
+    membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=msg.chat_id).first()
+    if msg.sender_id == current_user.id or (membership and membership.role in ['owner', 'admin']):
+        db.session.delete(msg)
+        db.session.commit()
+        return jsonify({'success': True})
+    return jsonify({'success': False})
+
+# -------------------- Закрепление сообщения --------------------
+@app.route('/pin_message', methods=['POST'])
+@login_required
+def pin_message():
+    data = request.get_json()
+    msg_id = data.get('message_id')
+    msg = Message.query.get(msg_id)
+    if not msg:
+        return jsonify({'success': False})
+    membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=msg.chat_id).first()
+    if membership and membership.role in ['owner', 'admin']:
+        Message.query.filter_by(chat_id=msg.chat_id, pinned=True).update({'pinned': False})
+        msg.pinned = True
+        db.session.commit()
+        return jsonify({'success': True})
+    return jsonify({'success': False})
+
+# -------------------- Загрузка файлов --------------------
+@app.route('/upload', methods=['POST'])
+@login_required
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'error': 'No file'})
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'success': False, 'error': 'No file'})
+    if file and allowed_file(file.filename):
+        filename = secure_filename(f"{current_user.id}_{datetime.now().timestamp()}_{file.filename}")
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(file_path)
+        file_type = file.content_type or mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+        return jsonify({'success': True, 'file_path': file_path, 'file_name': file.filename, 'file_type': file_type})
+    return jsonify({'success': False, 'error': 'File type not allowed'})
+
+# -------------------- Реакции --------------------
+@app.route('/react', methods=['POST'])
+@login_required
+def react():
+    data = request.get_json()
+    message_id = data.get('message_id')
+    reaction = data.get('reaction')
+    if not message_id or not reaction:
+        return jsonify({'success': False})
+    existing = Reaction.query.filter_by(message_id=message_id, user_id=current_user.id, reaction=reaction).first()
+    if existing:
+        db.session.delete(existing)
+    else:
+        Reaction.query.filter_by(message_id=message_id, user_id=current_user.id).delete()
+        r = Reaction(message_id=message_id, user_id=current_user.id, reaction=reaction)
+        db.session.add(r)
+    db.session.commit()
+    return jsonify({'success': True})
+
+# -------------------- Пересылка --------------------
+@app.route('/forward', methods=['POST'])
+@login_required
+def forward():
+    data = request.get_json()
+    message_id = data.get('message_id')
+    to_chat_id = data.get('to_chat_id')
+    if not message_id or not to_chat_id:
+        return jsonify({'success': False})
+    original = Message.query.get(message_id)
+    if not original:
+        return jsonify({'success': False})
+    membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=to_chat_id).first()
+    if not membership:
+        return jsonify({'success': False})
+    new_msg = Message(
+        sender_id=current_user.id,
+        chat_id=to_chat_id,
+        content=original.content,
+        forwarded_from=original.id,
+        file_path=original.file_path,
+        file_name=original.file_name,
+        file_type=original.file_type
+    )
+    db.session.add(new_msg)
+    db.session.commit()
+    socketio.emit('new_message', {
+        'content': new_msg.content,
+        'sender_id': current_user.id,
+        'sender_name': current_user.first_name,
+        'chat_id': to_chat_id,
+        'file_path': new_msg.file_path,
+        'file_name': new_msg.file_name
+    }, room=f"chat_{to_chat_id}")
+    return jsonify({'success': True})
+
+# -------------------- Комментарии к сообщению --------------------
+@app.route('/message/<int:message_id>/comments', methods=['GET', 'POST'])
+@login_required
+def message_comments(message_id):
+    message = Message.query.get_or_404(message_id)
+    membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=message.chat_id).first()
+    if not membership:
+        flash('Доступ запрещён')
+        return redirect(url_for('chats'))
+    if request.method == 'POST':
+        content = request.form.get('content')
+        if content:
+            comment = Comment(user_id=current_user.id, message_id=message_id, content=content)
+            db.session.add(comment)
+            db.session.commit()
+            flash('Комментарий добавлен')
+        return redirect(url_for('message_comments', message_id=message_id))
+    comments = Comment.query.filter_by(message_id=message_id).order_by(Comment.created_at).all()
+    return render_template_string('''
+        <!DOCTYPE html>
+        <html>
+        <head><title>Комментарии</title><meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { background: #f5f7fa; padding:20px; }
+            .container { max-width:600px; margin:0 auto; background:white; border-radius:30px; padding:30px; }
+            .comment { padding:15px; border-bottom:1px solid #eee; }
+            .author { font-weight:bold; color:#2c6b9e; }
+            .time { font-size:12px; color:#999; margin-left:10px; }
+            .content { margin-top:5px; }
+            textarea { width:100%; padding:12px; border:2px solid #e2e8f0; border-radius:15px; }
+            .btn { background:linear-gradient(145deg,#0b2b5c,#2c6b9e); color:white; border:none; padding:12px; border-radius:15px; cursor:pointer; }
+        </style>
+        </head>
+        <body><div class="container">
+            <a href="/chat/{{ message.chat_id }}" style="display:block; margin-bottom:20px;">← Назад</a>
+            <h2>Комментарии</h2>
+            <div style="background:#e6f0fa; padding:10px; border-radius:15px; margin-bottom:20px;">{{ message.content }}</div>
+            {% with messages = get_flashed_messages() %}{% if messages %}{% for msg in messages %}<div style="background:#fed7d7; padding:10px; border-radius:10px;">{{ msg }}</div>{% endfor %}{% endif %}{% endwith %}
+            <div id="comments">{% for comment in comments %}<div class="comment"><span class="author">{{ comment.user.first_name }}</span><span class="time">{{ comment.created_at.strftime('%d.%m.%Y %H:%M') }}</span><div class="content">{{ comment.content }}</div></div>{% endfor %}</div>
+            <form method="POST"><textarea name="content" placeholder="Напишите комментарий..." rows="3"></textarea><button type="submit" class="btn">Отправить</button></form>
+        </div></body></html>
+    ''', message=message, comments=comments)
+
+# -------------------- Информация о чате --------------------
+@app.route('/chat/<int:chat_id>/info')
+@login_required
+def chat_info(chat_id):
+    chat = Chat.query.get_or_404(chat_id)
+    membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=chat_id).first()
+    if not membership:
+        flash('Вы не участник этого чата')
+        return redirect(url_for('chats'))
+    members = User.query.join(ChatMember, ChatMember.user_id == User.id).filter(ChatMember.chat_id == chat_id).all()
+    member_roles = {m.user_id: m.role for m in ChatMember.query.filter_by(chat_id=chat_id)}
+    return render_template_string('''
+        <!DOCTYPE html>
+        <html>
+        <head><title>Информация о чате</title><meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { background:#f5f7fa; padding:20px; }
+            .container { max-width:600px; margin:0 auto; background:white; border-radius:30px; padding:30px; }
+            .member { display:flex; align-items:center; padding:12px; border-bottom:1px solid #eee; }
+            .member-avatar { width:40px; height:40px; border-radius:50%; background:linear-gradient(145deg,#0b2b5c,#2c6b9e); color:white; display:flex; align-items:center; justify-content:center; margin-right:15px; }
+            .member-name { flex:1; }
+            .member-role { color:#718096; }
+            .btn { background:linear-gradient(145deg,#0b2b5c,#2c6b9e); color:white; padding:10px 20px; border-radius:30px; text-decoration:none; display:inline-block; margin-top:20px; }
+            .btn-small { padding:5px 10px; font-size:12px; margin-left:5px; }
+        </style>
+        </head>
+        <body><div class="container">
+            <a href="/chat/{{ chat.id }}" style="display:block; margin-bottom:20px;">← Вернуться</a>
+            <h2>{{ get_chat_name(chat) }}</h2>
+            <p>Тип: {% if chat.is_channel %}Канал{% elif chat.is_group %}Группа{% else %}Личный чат{% endif %}</p>
+            {% if chat.invite_token %}<p>Приглашение: <a href="{{ url_for('join_chat', token=chat.invite_token) }}">{{ request.host_url }}join/{{ chat.invite_token }}</a></p>{% endif %}
+            <h3>Участники ({{ members|length }})</h3>
+            <div>{% for user in members %}<div class="member"><div class="member-avatar">{{ user.first_name[:1] }}</div><div class="member-name">{{ user.first_name }} {{ user.last_name }}</div><div class="member-role">{{ member_roles[user.id] }}</div>{% if (membership.role in ['owner','admin']) and user.id != current_user.id %}<div><a href="/chat/{{ chat.id }}/set_role/{{ user.id }}/admin" class="btn-small">админ</a><a href="/chat/{{ chat.id }}/set_role/{{ user.id }}/member" class="btn-small">участник</a><a href="/chat/{{ chat.id }}/remove/{{ user.id }}" class="btn-small">удалить</a></div>{% endif %}</div>{% endfor %}</div>
+            {% if chat.is_group or chat.is_channel %}
+                {% if membership.role in ['owner','admin'] %}<a href="/chat/{{ chat.id }}/add_member" class="btn">Добавить участника</a>{% endif %}
+                <a href="/chat/{{ chat.id }}/leave" class="btn" style="background:#dc3545;">Покинуть чат</a>
+            {% endif %}
+        </div></body></html>
+    ''', chat=chat, members=members, member_roles=member_roles, get_chat_name=get_chat_name, membership=membership)
+
+# -------------------- Назначение роли --------------------
+@app.route('/chat/<int:chat_id>/set_role/<int:user_id>/<role>')
+@login_required
+def set_role(chat_id, user_id, role):
+    chat = Chat.query.get_or_404(chat_id)
+    membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=chat_id).first()
+    if not membership or membership.role != 'owner':
+        flash('Нет прав')
+        return redirect(url_for('chat_info', chat_id=chat_id))
+    target = ChatMember.query.filter_by(user_id=user_id, chat_id=chat_id).first()
+    if target:
+        target.role = role
+        db.session.commit()
+        flash('Роль изменена')
+    return redirect(url_for('chat_info', chat_id=chat_id))
+
+# -------------------- Удаление участника --------------------
+@app.route('/chat/<int:chat_id>/remove/<int:user_id>')
+@login_required
+def remove_member(chat_id, user_id):
+    chat = Chat.query.get_or_404(chat_id)
+    membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=chat_id).first()
+    if not membership or membership.role not in ['owner', 'admin']:
+        flash('Нет прав')
+        return redirect(url_for('chat_info', chat_id=chat_id))
+    target = ChatMember.query.filter_by(user_id=user_id, chat_id=chat_id).first()
+    if target and target.user_id != current_user.id:
+        db.session.delete(target)
+        db.session.commit()
+        flash('Участник удалён')
+    return redirect(url_for('chat_info', chat_id=chat_id))
+
+# -------------------- Покинуть чат --------------------
+@app.route('/chat/<int:chat_id>/leave')
+@login_required
+def leave_chat(chat_id):
+    membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=chat_id).first()
+    if membership:
+        db.session.delete(membership)
+        db.session.commit()
+        flash('Вы покинули чат')
+    return redirect(url_for('chats'))
+
+# -------------------- Присоединиться по ссылке --------------------
+@app.route('/join/<token>')
+@login_required
+def join_chat(token):
+    chat = Chat.query.filter_by(invite_token=token).first()
+    if not chat:
+        flash('Неверная ссылка')
+        return redirect(url_for('chats'))
+    existing = ChatMember.query.filter_by(user_id=current_user.id, chat_id=chat.id).first()
+    if existing:
+        flash('Вы уже в чате')
+    else:
+        cm = ChatMember(user_id=current_user.id, chat_id=chat.id, role='member')
+        db.session.add(cm)
+        db.session.commit()
+        flash('Вы присоединились к чату')
+    return redirect(url_for('chat', chat_id=chat.id))
+
+# -------------------- Добавление участника --------------------
+@app.route('/chat/<int:chat_id>/add_member', methods=['GET', 'POST'])
+@login_required
+def add_member(chat_id):
+    chat = Chat.query.get_or_404(chat_id)
+    membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=chat_id).first()
+    if not membership or membership.role not in ['owner', 'admin']:
+        flash('У вас нет прав')
+        return redirect(url_for('chat_info', chat_id=chat_id))
+    if request.method == 'POST':
+        username = request.form.get('username')
+        user = User.query.filter_by(username=username).first()
+        if not user:
+            flash('Пользователь не найден')
+        elif ChatMember.query.filter_by(user_id=user.id, chat_id=chat_id).first():
+            flash('Пользователь уже в чате')
+        else:
+            cm = ChatMember(user_id=user.id, chat_id=chat_id, role='member')
+            db.session.add(cm)
+            db.session.commit()
+            flash('Пользователь добавлен')
+            return redirect(url_for('chat_info', chat_id=chat_id))
+    return render_template_string('''
+        <!DOCTYPE html>
+        <html>
+        <head><title>Добавить участника</title><meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            * { margin:0; padding:0; box-sizing:border-box; font-family:'Segoe UI',sans-serif; }
+            body { background:linear-gradient(145deg,#0b2b5c,#2c6b9e); min-height:100vh; display:flex; justify-content:center; align-items:center; padding:20px; }
+            .container { background:white; border-radius:30px; padding:40px; max-width:400px; width:100%; box-shadow:0 30px 60px rgba(0,0,0,0.3); }
+            h2 { color:#0b2b5c; margin-bottom:20px; text-align:center; }
+            .form-group { margin-bottom:15px; }
+            input { width:100%; padding:12px; border:2px solid #e2e8f0; border-radius:15px; }
+            .btn { background:linear-gradient(145deg,#0b2b5c,#2c6b9e); color:white; border:none; padding:14px; border-radius:15px; cursor:pointer; width:100%; }
+            .btn-outline { background:white; color:#2c6b9e; border:2px solid #2c6b9e; margin-top:10px; }
+            .flash { background-color:#fed7d7; color:#c53030; padding:10px; border-radius:12px; margin-bottom:15px; }
+        </style>
+        </head>
+        <body><div class="container">
+            <h2>Добавить участника</h2>
+            {% with messages = get_flashed_messages() %}{% if messages %}{% for message in messages %}<div class="flash">{{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+            <form method="POST"><div class="form-group"><input type="text" name="username" placeholder="Имя пользователя (@)" required></div><button type="submit" class="btn">Добавить</button><a href="/chat/{{ chat.id }}/info" class="btn btn-outline">Отмена</a></form>
+        </div></body></html>
+    ''', chat=chat)
+
+# -------------------- Настройки профиля --------------------
+@app.route('/settings', methods=['GET', 'POST'])
+@login_required
+def settings():
+    if request.method == 'POST':
+        first_name = request.form.get('first_name')
+        last_name = request.form.get('last_name')
+        email = request.form.get('email')
+        password = request.form.get('password')
+        new_password = request.form.get('new_password')
+        confirm = request.form.get('confirm_password')
+        if first_name: current_user.first_name = first_name
+        if last_name: current_user.last_name = last_name
+        if email and email != current_user.email:
+            if User.query.filter_by(email=email).first(): flash('Email уже используется')
+            else: current_user.email = email
+        if password and new_password and confirm:
+            if current_user.check_password(password):
+                if new_password == confirm: current_user.set_password(new_password)
+                else: flash('Новые пароли не совпадают')
+            else: flash('Неверный текущий пароль')
+        if 'avatar' in request.files:
+            file = request.files['avatar']
+            if file and file.filename:
+                filename = secure_filename(f"{current_user.id}_{file.filename}")
+                file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+                current_user.avatar = filename
+        db.session.commit()
+        flash('Настройки сохранены')
+        return redirect(url_for('settings'))
+    return render_template_string('''
+        <!DOCTYPE html>
+        <html>
+        <head><title>Настройки</title><meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { background:#f5f7fa; padding:20px; }
+            .container { max-width:600px; margin:0 auto; background:white; border-radius:30px; padding:30px; }
+            .form-group { margin-bottom:15px; }
+            label { display:block; margin-bottom:5px; }
+            input { width:100%; padding:12px; border:2px solid #e2e8f0; border-radius:15px; }
+            .btn { background:linear-gradient(145deg,#0b2b5c,#2c6b9e); color:white; border:none; padding:14px; border-radius:15px; cursor:pointer; width:100%; }
+        </style>
+        </head>
+        <body><div class="container">
+            <h2>Настройки</h2>
+            {% with messages = get_flashed_messages() %}{% if messages %}{% for msg in messages %}<div style="background:#fed7d7; padding:10px; border-radius:10px;">{{ msg }}</div>{% endfor %}{% endif %}{% endwith %}
+            <form method="POST" enctype="multipart/form-data">
+                <div class="form-group"><label>Имя</label><input name="first_name" value="{{ current_user.first_name }}"></div>
+                <div class="form-group"><label>Фамилия</label><input name="last_name" value="{{ current_user.last_name }}"></div>
+                <div class="form-group"><label>Email</label><input name="email" value="{{ current_user.email }}"></div>
+                <div class="form-group"><label>Аватар</label><input type="file" name="avatar"></div>
+                <hr>
+                <div class="form-group"><label>Текущий пароль</label><input type="password" name="password"></div>
+                <div class="form-group"><label>Новый пароль</label><input type="password" name="new_password"></div>
+                <div class="form-group"><label>Подтверждение</label><input type="password" name="confirm_password"></div>
+                <button type="submit" class="btn">Сохранить</button>
+            </form>
+            <a href="/chats" style="display:block; margin-top:20px;">← Назад</a>
+        </div></body></html>
+    ''', current_user=current_user)
+
+# -------------------- Профиль --------------------
+@app.route('/profile')
+@login_required
+def profile():
+    return render_template_string('''
+        <!DOCTYPE html>
+        <html>
+        <head><title>Профиль</title><meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { background:linear-gradient(145deg,#0b2b5c,#2c6b9e); min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
+            .container { background:white; border-radius:30px; padding:40px; max-width:500px; width:100%; text-align:center; }
+            .avatar { width:120px; height:120px; border-radius:50%; margin:0 auto 20px; border:4px solid #2c6b9e; object-fit:cover; }
+            h2 { color:#0b2b5c; }
+            .username { color:#2c6b9e; margin-bottom:20px; }
+            .info-item { display:flex; padding:10px; border-bottom:1px solid #eee; }
+            .info-label { font-weight:bold; width:120px; text-align:left; }
+            .btn { display:inline-block; background:linear-gradient(145deg,#0b2b5c,#2c6b9e); color:white; padding:12px 30px; border-radius:30px; text-decoration:none; margin-top:20px; }
+        </style>
+        </head>
+        <body><div class="container">
+            <img src="{{ url_for('uploads', filename=current_user.avatar) if current_user.avatar != 'default.jpg' else '/photos/default.jpg' }}" class="avatar">
+            <h2>{{ current_user.first_name }} {{ current_user.last_name }}</h2>
+            <div class="username">@{{ current_user.username }}</div>
+            <div class="info-item"><span class="info-label">Email:</span> {{ current_user.email }}</div>
+            <div class="info-item"><span class="info-label">День рождения:</span> {{ current_user.birth_day }}.{{ current_user.birth_month if current_user.birth_day else 'не указан' }}</div>
+            <a href="/chats" class="btn">К чатам</a>
+        </div></body></html>
+    ''')
+
+# -------------------- Вход --------------------
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        user = User.query.filter_by(username=username).first()
+        if user and user.check_password(password):
+            login_user(user)
+            return redirect(url_for('chats'))
+        else:
+            flash('Неверные данные')
+    return render_template_string('''
+        <!DOCTYPE html>
+        <html>
+        <head><title>Вход</title><meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { background:linear-gradient(145deg,#0b2b5c,#2c6b9e); min-height:100vh; display:flex; justify-content:center; align-items:center; }
+            .form-container { background:white; border-radius:30px; padding:40px; max-width:400px; width:100%; }
+            h2 { color:#0b2b5c; text-align:center; }
+            input { width:100%; padding:14px; border:2px solid #e2e8f0; border-radius:15px; margin-bottom:20px; }
+            .btn { background:linear-gradient(145deg,#0b2b5c,#2c6b9e); color:white; border:none; padding:14px; border-radius:15px; width:100%; cursor:pointer; }
+            .flash { background:#fed7d7; padding:10px; border-radius:10px; margin-bottom:15px; }
+        </style>
+        </head>
+        <body><div class="form-container">
+            <h2>Вход</h2>
+            {% with messages = get_flashed_messages() %}{% if messages %}{% for msg in messages %}<div class="flash">{{ msg }}</div>{% endfor %}{% endif %}{% endwith %}
+            <form method="POST"><input type="text" name="username" placeholder="Имя пользователя" required><input type="password" name="password" placeholder="Пароль" required><button type="submit" class="btn">Войти</button></form>
+            <div style="text-align:center; margin-top:20px;"><a href="/register">Регистрация</a></div>
+        </div></body></html>
+    ''')
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for('index'))
+
+# -------------------- WebSocket события --------------------
+@socketio.on('join')
+def on_join(data):
+    chat_id = data['chat_id']
+    join_room(f"chat_{chat_id}")
+
+@socketio.on('send_message')
+def handle_message(data):
+    chat_id = data['chat_id']
+    content = data.get('content', '')
+    sender_id = data['sender_id']
+    reply_to = data.get('reply_to')
+    file_path = data.get('file_path')
+    file_name = data.get('file_name')
+    file_type = data.get('file_type')
+    sender = db.session.get(User, sender_id)
+    msg = Message(
+        sender_id=sender_id,
+        chat_id=chat_id,
+        content=content,
+        reply_to=reply_to,
+        file_path=file_path,
+        file_name=file_name,
+        file_type=file_type
+    )
+    db.session.add(msg)
+    db.session.commit()
+    emit('new_message', {
+        'content': content,
+        'sender_id': sender_id,
+        'sender_name': sender.first_name,
+        'chat_id': chat_id,
+        'reply_to': reply_to,
+        'file_path': file_path,
+        'file_name': file_name
+    }, room=f"chat_{chat_id}")
+
+# -------------------- Создание таблиц --------------------
+with app.app_context():
+    db.create_all()
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     socketio.run(app, host='0.0.0.0', port=port, debug=True, allow_unsafe_werkzeug=True)
