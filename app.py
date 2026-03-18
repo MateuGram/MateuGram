@@ -651,9 +651,40 @@ def new_chat():
     saved_username = ''
 
     if request.method == 'POST':
-        chat_type = request.form.get('type', 'private')
+        action = request.form.get('action', 'create')  # 'create' или 'join'
+
+        # --- Вступление по ID ---
+        if action == 'join':
+            chat_id = request.form.get('chat_id', '').strip()
+            if not chat_id:
+                flash('Введите ID чата')
+                return redirect(url_for('new_chat'))
+            try:
+                chat_id = int(chat_id)
+            except ValueError:
+                flash('ID чата должен быть числом')
+                return redirect(url_for('new_chat'))
+            chat = Chat.query.get(chat_id)
+            if not chat:
+                flash('Чат не найден')
+                return redirect(url_for('new_chat'))
+            # Проверка, не участник ли уже
+            existing = ChatMember.query.filter_by(user_id=current_user.id, chat_id=chat.id).first()
+            if existing:
+                flash('Вы уже в этом чате')
+                return redirect(url_for('chat', chat_id=chat.id))
+            # Добавляем участника
+            cm = ChatMember(user_id=current_user.id, chat_id=chat.id, role='member')
+            db.session.add(cm)
+            db.session.commit()
+            flash('Вы присоединились к чату')
+            return redirect(url_for('chat', chat_id=chat.id))
+
+        # --- Создание чата ---
+        # Получаем тип из скрытого поля (устанавливается JavaScript)
+        chat_type = request.form.get('chat_type', 'private')
         raw_name = request.form.get('name', '')
-        saved_name = raw_name  # сохраняем как есть для отображения
+        saved_name = raw_name
         saved_username = request.form.get('username', '').strip()
         selected_type = chat_type
 
@@ -763,14 +794,39 @@ NEW_CHAT_TEMPLATE = '''
             background: white;
             border-radius: 30px;
             padding: 40px;
-            max-width: 500px;
+            max-width: 550px;
             width: 100%;
             box-shadow: 0 30px 60px rgba(0,0,0,0.3);
         }
         h2 { color: #0b2b5c; margin-bottom: 25px; text-align: center; }
+        .type-buttons {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        .type-btn {
+            flex: 1;
+            padding: 14px;
+            border: 2px solid #e2e8f0;
+            background: white;
+            color: #2d3748;
+            border-radius: 15px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .type-btn.active {
+            background: linear-gradient(145deg, #0b2b5c, #2c6b9e);
+            color: white;
+            border-color: transparent;
+        }
+        .type-btn:hover { background: #e6f0fa; }
+        .type-btn.active:hover { background: linear-gradient(145deg, #1b4a7a, #3c7bb9); }
         .form-group { margin-bottom: 20px; }
         label { display: block; margin-bottom: 8px; color: #2d3748; font-weight: 600; }
-        input, select {
+        input {
             width: 100%;
             padding: 14px 18px;
             border: 2px solid #e2e8f0;
@@ -778,7 +834,7 @@ NEW_CHAT_TEMPLATE = '''
             font-size: 16px;
             transition: 0.3s;
         }
-        input:focus, select:focus {
+        input:focus {
             border-color: #2c6b9e;
             outline: none;
             background: #f8fafc;
@@ -809,10 +865,24 @@ NEW_CHAT_TEMPLATE = '''
             border-radius: 12px;
             margin-bottom: 25px;
         }
+        .section-title {
+            font-size: 1.2em;
+            margin: 25px 0 15px;
+            color: #0b2b5c;
+            border-bottom: 2px solid #e2e8f0;
+            padding-bottom: 5px;
+        }
+        hr { margin: 30px 0; border: 1px solid #e2e8f0; }
     </style>
     <script>
-        function toggleFields() {
-            var type = document.getElementById('type').value;
+        function setType(type) {
+            document.getElementById('chat_type').value = type;
+            // Обновляем классы кнопок
+            document.querySelectorAll('.type-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            document.getElementById('btn-' + type).classList.add('active');
+            // Показываем нужные поля
             document.getElementById('private-fields').style.display = type === 'private' ? 'block' : 'none';
             document.getElementById('group-fields').style.display = type === 'group' ? 'block' : 'none';
             document.getElementById('channel-fields').style.display = type === 'channel' ? 'block' : 'none';
@@ -829,42 +899,66 @@ NEW_CHAT_TEMPLATE = '''
             {% endfor %}
           {% endif %}
         {% endwith %}
+
+        <!-- Форма создания чата -->
         <form method="POST">
-            <div class="form-group">
-                <label>Тип чата</label>
-                <select name="type" id="type" onchange="toggleFields()">
-                    <option value="private" {% if selected_type == 'private' %}selected{% endif %}>Личный чат</option>
-                    <option value="group" {% if selected_type == 'group' %}selected{% endif %}>Группа</option>
-                    <option value="channel" {% if selected_type == 'channel' %}selected{% endif %}>Канал</option>
-                </select>
+            <input type="hidden" name="action" value="create">
+            <input type="hidden" name="chat_type" id="chat_type" value="{{ selected_type }}">
+
+            <div class="type-buttons">
+                <button type="button" id="btn-private" class="type-btn {% if selected_type == 'private' %}active{% endif %}" onclick="setType('private')">Личный чат</button>
+                <button type="button" id="btn-group" class="type-btn {% if selected_type == 'group' %}active{% endif %}" onclick="setType('group')">Группа</button>
+                <button type="button" id="btn-channel" class="type-btn {% if selected_type == 'channel' %}active{% endif %}" onclick="setType('channel')">Канал</button>
             </div>
+
             <div id="private-fields" style="display: {{ 'block' if selected_type == 'private' else 'none' }};">
                 <div class="form-group">
                     <label>Имя пользователя (собеседник)</label>
                     <input type="text" name="username" placeholder="@username" value="{{ saved_username }}">
                 </div>
             </div>
+
             <div id="group-fields" style="display: {{ 'block' if selected_type == 'group' else 'none' }};">
                 <div class="form-group">
                     <label>Название группы</label>
                     <input type="text" name="name" value="{{ saved_name if selected_type == 'group' else '' }}">
                 </div>
             </div>
+
             <div id="channel-fields" style="display: {{ 'block' if selected_type == 'channel' else 'none' }};">
                 <div class="form-group">
                     <label>Название канала</label>
                     <input type="text" name="name" value="{{ saved_name if selected_type == 'channel' else '' }}">
                 </div>
             </div>
+
             <button type="submit" class="btn">Создать</button>
-            <a href="/chats" class="btn btn-outline">Отмена</a>
         </form>
+
+        <hr>
+
+        <!-- Форма вступления по ID -->
+        <div class="section-title">Присоединиться к чату</div>
+        <form method="POST">
+            <input type="hidden" name="action" value="join">
+            <div class="form-group">
+                <label>ID чата</label>
+                <input type="text" name="chat_id" placeholder="Введите ID чата" required>
+            </div>
+            <button type="submit" class="btn btn-outline">Вступить</button>
+        </form>
+
+        <a href="/chats" style="display: block; text-align: center; margin-top: 25px; color: #2c6b9e;">← Вернуться к чатам</a>
     </div>
-    <script>toggleFields();</script>
+
+    <script>
+        // При загрузке устанавливаем правильный тип из переданного selected_type
+        var initialType = "{{ selected_type }}";
+        setType(initialType);
+    </script>
 </body>
 </html>
 '''
-
 # -------------------- Чат с WebRTC звонками --------------------
 @app.route('/chat/<int:chat_id>')
 @login_required
