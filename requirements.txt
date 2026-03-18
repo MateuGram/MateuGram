@@ -6,3 +6,4 @@ Flask-SocketIO==5.3.4
 Werkzeug==2.3.7
 itsdangerous==2.1.2
 email-validator==2.0.0
+pysqlite3-binary==0.5.2
