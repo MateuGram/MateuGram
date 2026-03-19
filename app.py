@@ -25,7 +25,26 @@ import threading
 import time
 from pathlib import Path
 from functools import wraps
+import secrets
 
+# Секретный ключ для вызова /sync-ftp (задайте через переменную окружения)
+SYNC_SECRET = os.getenv('SYNC_SECRET', secrets.token_urlsafe(16))
+
+@app.route('/ping')
+def ping():
+    """Пустой эндпоинт для поддержания активности приложения."""
+    return 'pong', 200
+
+@app.route('/sync-ftp', methods=['POST'])
+def sync_ftp():
+    """Вызывает полную синхронизацию с FTP. Требует секретный заголовок."""
+    auth = request.headers.get('X-Sync-Secret')
+    if auth != SYNC_SECRET:
+        return 'Unauthorized', 403
+    # Запускаем синхронизацию в фоне, чтобы не блокировать ответ
+    threading.Thread(target=sync_to_ftp, daemon=True).start()
+    return 'Sync started', 202
+    
 # ---------- Конфигурация FTP (задаётся через переменные окружения) ----------
 FTP_HOST = os.getenv('FTP_HOST', 'mc.mateucraft.ru')
 FTP_USER = os.getenv('FTP_USER', 'mc64828')
