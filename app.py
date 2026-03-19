@@ -19,7 +19,193 @@ from flask_mail import Mail, Message
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
+import ftplib
+import os
+import threading
+import time
+from pathlib import Path
+from functools import wraps
 
+# ---------- Конфигурация FTP (задаётся через переменные окружения) ----------
+FTP_HOST = os.getenv('FTP_HOST', 'mc.mateucraft.ru')
+FTP_USER = os.getenv('FTP_USER', 'mc64828')
+FTP_PASS = os.getenv('FTP_PASS', 'uwiorhcbeyr')
+FTP_BASE_PATH = os.getenv('FTP_BASE_PATH', '/mateugram')  # папка на FTP, где хранятся данные
+LOCAL_DB_PATH = 'mateugram.db'
+LOCAL_UPLOAD_FOLDER = 'uploads'
+
+# ---------- Вспомогательные функции для работы с FTP ----------
+def get_ftp_connection():
+    """Возвращает FTP-соединение или None при ошибке."""
+    try:
+        ftp = ftplib.FTP(FTP_HOST, FTP_USER, FTP_PASS, timeout=10)
+        ftp.encoding = 'utf-8'
+        # Переходим в рабочую папку, создаём если нет
+        try:
+            ftp.cwd(FTP_BASE_PATH)
+        except ftplib.error_perm:
+            # Папка не существует – создаём
+            parts = FTP_BASE_PATH.strip('/').split('/')
+            current = ''
+            for part in parts:
+                current += '/' + part
+                try:
+                    ftp.cwd(current)
+                except ftplib.error_perm:
+                    ftp.mkd(part)
+                    ftp.cwd(part)
+        return ftp
+    except Exception as e:
+        print(f"FTP connection error: {e}")
+        return None
+
+def download_file_from_ftp(remote_path, local_path):
+    """Скачивает файл с FTP, если он существует."""
+    try:
+        ftp = get_ftp_connection()
+        if not ftp:
+            return False
+        # Проверяем, существует ли файл
+        try:
+            ftp.size(remote_path)
+        except ftplib.error_perm:
+            ftp.quit()
+            return False
+        with open(local_path, 'wb') as f:
+            ftp.retrbinary(f'RETR {remote_path}', f.write)
+        ftp.quit()
+        return True
+    except Exception as e:
+        print(f"Download error: {e}")
+        return False
+
+def upload_file_to_ftp(local_path, remote_path):
+    """Загружает локальный файл на FTP."""
+    try:
+        ftp = get_ftp_connection()
+        if not ftp:
+            return False
+        with open(local_path, 'rb') as f:
+            ftp.storbinary(f'STOR {remote_path}', f)
+        ftp.quit()
+        return True
+    except Exception as e:
+        print(f"Upload error: {e}")
+        return False
+
+def sync_from_ftp():
+    """При запуске: скачиваем базу и все файлы из uploads с FTP."""
+    print("Syncing from FTP...")
+    # Скачиваем базу данных
+    db_remote = 'mateugram.db'
+    if download_file_from_ftp(db_remote, LOCAL_DB_PATH):
+        print("Database downloaded.")
+    else:
+        print("No remote database found, will create new one.")
+
+    # Скачиваем все файлы из папки uploads (рекурсивно)
+    try:
+        ftp = get_ftp_connection()
+        if ftp:
+            # Переходим в папку uploads на FTP
+            try:
+                ftp.cwd('uploads')
+            except ftplib.error_perm:
+                # Папка uploads не существует – создадим позже
+                ftp.quit()
+                os.makedirs(LOCAL_UPLOAD_FOLDER, exist_ok=True)
+                return
+
+            # Рекурсивно скачиваем все файлы
+            def download_dir(remote_dir, local_dir):
+                os.makedirs(local_dir, exist_ok=True)
+                items = []
+                ftp.dir(remote_dir, items.append)
+                for item in items:
+                    parts = item.split()
+                    name = parts[-1]
+                    if item.startswith('d'):  # директория
+                        download_dir(f"{remote_dir}/{name}", os.path.join(local_dir, name))
+                    else:  # файл
+                        local_file = os.path.join(local_dir, name)
+                        remote_file = f"{remote_dir}/{name}"
+                        with open(local_file, 'wb') as f:
+                            ftp.retrbinary(f'RETR {remote_file}', f.write)
+                        print(f"Downloaded {remote_file}")
+            download_dir('.', LOCAL_UPLOAD_FOLDER)
+            ftp.quit()
+    except Exception as e:
+        print(f"FTP sync error during download: {e}")
+
+def sync_to_ftp():
+    """Загружает базу и все файлы из uploads на FTP (полная синхронизация)."""
+    print("Syncing to FTP...")
+    # Загружаем базу данных
+    if os.path.exists(LOCAL_DB_PATH):
+        upload_file_to_ftp(LOCAL_DB_PATH, 'mateugram.db')
+        print("Database uploaded.")
+
+    # Загружаем все файлы из локальной папки uploads
+    try:
+        ftp = get_ftp_connection()
+        if not ftp:
+            return
+        # Создаём папку uploads, если нет
+        try:
+            ftp.cwd('uploads')
+        except ftplib.error_perm:
+            ftp.mkd('uploads')
+            ftp.cwd('uploads')
+
+        # Рекурсивная загрузка
+        def upload_dir(local_dir, remote_dir):
+            for root, dirs, files in os.walk(local_dir):
+                # Относительный путь от LOCAL_UPLOAD_FOLDER
+                rel_path = os.path.relpath(root, LOCAL_UPLOAD_FOLDER)
+                if rel_path == '.':
+                    remote_subdir = remote_dir
+                else:
+                    remote_subdir = f"{remote_dir}/{rel_path.replace(os.sep, '/')}"
+                    # Создаём поддиректорию на FTP
+                    try:
+                        ftp.cwd(remote_subdir)
+                    except ftplib.error_perm:
+                        parts = remote_subdir.split('/')
+                        current = ''
+                        for part in parts:
+                            current += '/' + part
+                            try:
+                                ftp.cwd(current)
+                            except ftplib.error_perm:
+                                ftp.mkd(part)
+                                ftp.cwd(part)
+
+                for file in files:
+                    local_file = os.path.join(root, file)
+                    remote_file = f"{remote_subdir}/{file}"
+                    with open(local_file, 'rb') as f:
+                        ftp.storbinary(f'STOR {remote_file}', f)
+                    print(f"Uploaded {remote_file}")
+        upload_dir(LOCAL_UPLOAD_FOLDER, 'uploads')
+        ftp.quit()
+    except Exception as e:
+        print(f"FTP sync error during upload: {e}")
+
+# ---------- Декоратор для синхронизации после изменений ----------
+def sync_after_change(func):
+    """Декоратор: выполняет функцию, затем запускает синхронизацию в фоне."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        # Запускаем синхронизацию в отдельном потоке, чтобы не блокировать ответ
+        threading.Thread(target=sync_to_ftp, daemon=True).start()
+        return result
+    return wrapper
+
+# ---------- Загрузка данных при старте ----------
+# Вызываем синхронизацию с FTP при запуске приложения
+# (но после того, как созданы папки, если они ещё не созданы)
+sync_from_ftp()
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-key-12345')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///mateugram.db'
