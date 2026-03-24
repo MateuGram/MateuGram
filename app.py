@@ -1,17 +1,27 @@
 import os
 import sys
+import ftplib
+import threading
+import random
+import string
+import mimetypes
+import json
+import secrets
+from datetime import datetime
+from pathlib import Path
+from functools import wraps
+from dotenv import load_dotenv
 
+# Загружаем переменные окружения из .env файла (если он есть)
+load_dotenv()
+
+# Подмена sqlite3 для хостинга (если нужно)
 try:
     import pysqlite3
     sys.modules['sqlite3'] = pysqlite3
 except ImportError:
     pass
 
-import random
-import string
-import mimetypes
-import json
-from datetime import datetime
 from flask import Flask, render_template_string, request, redirect, url_for, flash, session, send_from_directory, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
@@ -19,43 +29,53 @@ from flask_mail import Mail, Message
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
-import ftplib
-import os
-import threading
-import time
-from pathlib import Path
-from functools import wraps
-import secrets
 
-# Секретный ключ для вызова /sync-ftp (задайте через переменную окружения)
-SYNC_SECRET = os.getenv('SYNC_SECRET', secrets.token_urlsafe(16))
+# ---------- Конфигурация ----------
+app = Flask(__name__)
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-key-12345')
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///mateugram.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg', 'gif', 'mp4', 'mp3', 'pdf', 'doc', 'docx'}
 
-@app.route('/ping')
-def ping():
-    """Пустой эндпоинт для поддержания активности приложения."""
-    return 'pong', 200
+# Настройки почты (mail.ru)
+app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER', 'smtp.mail.ru')
+app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT', 465))
+app.config['MAIL_USE_SSL'] = os.getenv('MAIL_USE_SSL', 'True').lower() == 'true'
+app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
+app.config['MAIL_DEFAULT_SENDER'] = app.config['MAIL_USERNAME']
 
-@app.route('/sync-ftp', methods=['POST'])
-def sync_ftp():
-    """Вызывает полную синхронизацию с FTP. Требует секретный заголовок."""
-    auth = request.headers.get('X-Sync-Secret')
-    if auth != SYNC_SECRET:
-        return 'Unauthorized', 403
-    # Запускаем синхронизацию в фоне, чтобы не блокировать ответ
-    threading.Thread(target=sync_to_ftp, daemon=True).start()
-    return 'Sync started', 202
-    
-# ---------- Конфигурация FTP (задаётся через переменные окружения) ----------
-FTP_HOST = os.getenv('FTP_HOST', 'mc.mateucraft.ru')
-FTP_USER = os.getenv('FTP_USER', 'mc64828')
-FTP_PASS = os.getenv('FTP_PASS', 'uwiorhcbeyr')
+db = SQLAlchemy(app)
+mail = Mail(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
+login_manager = LoginManager(app)
+login_manager.login_view = 'login'
+
+# Создание папок
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs('photos', exist_ok=True)
+
+# ---------- FTP-синхронизация (через переменные окружения) ----------
+FTP_HOST = os.getenv('FTP_HOST')
+FTP_USER = os.getenv('FTP_USER')
+FTP_PASS = os.getenv('FTP_PASS')
 FTP_BASE_PATH = os.getenv('FTP_BASE_PATH', '/mateugram')  # папка на FTP, где хранятся данные
 LOCAL_DB_PATH = 'mateugram.db'
 LOCAL_UPLOAD_FOLDER = 'uploads'
 
-# ---------- Вспомогательные функции для работы с FTP ----------
+# Блокировка для потокобезопасной работы с FTP
+ftp_lock = threading.Lock()
+
+# Секретный ключ для вызова /sync-ftp (задаётся через переменную окружения)
+SYNC_SECRET = os.getenv('SYNC_SECRET', secrets.token_urlsafe(16))
+
 def get_ftp_connection():
-    """Возвращает FTP-соединение или None при ошибке."""
+    """Возвращает FTP-соединение или None при ошибке/отсутствии данных."""
+    if not FTP_HOST or not FTP_USER or not FTP_PASS:
+        print("FTP credentials are not set. Check environment variables.")
+        return None
     try:
         ftp = ftplib.FTP(FTP_HOST, FTP_USER, FTP_PASS, timeout=10)
         ftp.encoding = 'utf-8'
@@ -115,100 +135,102 @@ def upload_file_to_ftp(local_path, remote_path):
 def sync_from_ftp():
     """При запуске: скачиваем базу и все файлы из uploads с FTP."""
     print("Syncing from FTP...")
-    # Скачиваем базу данных
-    db_remote = 'mateugram.db'
-    if download_file_from_ftp(db_remote, LOCAL_DB_PATH):
-        print("Database downloaded.")
-    else:
-        print("No remote database found, will create new one.")
+    with ftp_lock:
+        # Скачиваем базу данных
+        db_remote = 'mateugram.db'
+        if download_file_from_ftp(db_remote, LOCAL_DB_PATH):
+            print("Database downloaded.")
+        else:
+            print("No remote database found, will create new one.")
 
-    # Скачиваем все файлы из папки uploads (рекурсивно)
-    try:
-        ftp = get_ftp_connection()
-        if ftp:
-            # Переходим в папку uploads на FTP
-            try:
-                ftp.cwd('uploads')
-            except ftplib.error_perm:
-                # Папка uploads не существует – создадим позже
+        # Скачиваем все файлы из папки uploads (рекурсивно)
+        try:
+            ftp = get_ftp_connection()
+            if ftp:
+                # Переходим в папку uploads на FTP
+                try:
+                    ftp.cwd('uploads')
+                except ftplib.error_perm:
+                    # Папка uploads не существует – создадим позже
+                    ftp.quit()
+                    os.makedirs(LOCAL_UPLOAD_FOLDER, exist_ok=True)
+                    return
+
+                # Рекурсивно скачиваем все файлы
+                def download_dir(remote_dir, local_dir):
+                    os.makedirs(local_dir, exist_ok=True)
+                    items = []
+                    ftp.dir(remote_dir, items.append)
+                    for item in items:
+                        parts = item.split()
+                        name = parts[-1]
+                        if item.startswith('d'):  # директория
+                            download_dir(f"{remote_dir}/{name}", os.path.join(local_dir, name))
+                        else:  # файл
+                            local_file = os.path.join(local_dir, name)
+                            remote_file = f"{remote_dir}/{name}"
+                            with open(local_file, 'wb') as f:
+                                ftp.retrbinary(f'RETR {remote_file}', f.write)
+                            print(f"Downloaded {remote_file}")
+                download_dir('.', LOCAL_UPLOAD_FOLDER)
                 ftp.quit()
-                os.makedirs(LOCAL_UPLOAD_FOLDER, exist_ok=True)
-                return
-
-            # Рекурсивно скачиваем все файлы
-            def download_dir(remote_dir, local_dir):
-                os.makedirs(local_dir, exist_ok=True)
-                items = []
-                ftp.dir(remote_dir, items.append)
-                for item in items:
-                    parts = item.split()
-                    name = parts[-1]
-                    if item.startswith('d'):  # директория
-                        download_dir(f"{remote_dir}/{name}", os.path.join(local_dir, name))
-                    else:  # файл
-                        local_file = os.path.join(local_dir, name)
-                        remote_file = f"{remote_dir}/{name}"
-                        with open(local_file, 'wb') as f:
-                            ftp.retrbinary(f'RETR {remote_file}', f.write)
-                        print(f"Downloaded {remote_file}")
-            download_dir('.', LOCAL_UPLOAD_FOLDER)
-            ftp.quit()
-    except Exception as e:
-        print(f"FTP sync error during download: {e}")
+        except Exception as e:
+            print(f"FTP sync error during download: {e}")
 
 def sync_to_ftp():
     """Загружает базу и все файлы из uploads на FTP (полная синхронизация)."""
     print("Syncing to FTP...")
-    # Загружаем базу данных
-    if os.path.exists(LOCAL_DB_PATH):
-        upload_file_to_ftp(LOCAL_DB_PATH, 'mateugram.db')
-        print("Database uploaded.")
+    with ftp_lock:
+        # Загружаем базу данных
+        if os.path.exists(LOCAL_DB_PATH):
+            upload_file_to_ftp(LOCAL_DB_PATH, 'mateugram.db')
+            print("Database uploaded.")
 
-    # Загружаем все файлы из локальной папки uploads
-    try:
-        ftp = get_ftp_connection()
-        if not ftp:
-            return
-        # Создаём папку uploads, если нет
+        # Загружаем все файлы из локальной папки uploads
         try:
-            ftp.cwd('uploads')
-        except ftplib.error_perm:
-            ftp.mkd('uploads')
-            ftp.cwd('uploads')
+            ftp = get_ftp_connection()
+            if not ftp:
+                return
+            # Создаём папку uploads, если нет
+            try:
+                ftp.cwd('uploads')
+            except ftplib.error_perm:
+                ftp.mkd('uploads')
+                ftp.cwd('uploads')
 
-        # Рекурсивная загрузка
-        def upload_dir(local_dir, remote_dir):
-            for root, dirs, files in os.walk(local_dir):
-                # Относительный путь от LOCAL_UPLOAD_FOLDER
-                rel_path = os.path.relpath(root, LOCAL_UPLOAD_FOLDER)
-                if rel_path == '.':
-                    remote_subdir = remote_dir
-                else:
-                    remote_subdir = f"{remote_dir}/{rel_path.replace(os.sep, '/')}"
-                    # Создаём поддиректорию на FTP
-                    try:
-                        ftp.cwd(remote_subdir)
-                    except ftplib.error_perm:
-                        parts = remote_subdir.split('/')
-                        current = ''
-                        for part in parts:
-                            current += '/' + part
-                            try:
-                                ftp.cwd(current)
-                            except ftplib.error_perm:
-                                ftp.mkd(part)
-                                ftp.cwd(part)
+            # Рекурсивная загрузка
+            def upload_dir(local_dir, remote_dir):
+                for root, dirs, files in os.walk(local_dir):
+                    # Относительный путь от LOCAL_UPLOAD_FOLDER
+                    rel_path = os.path.relpath(root, LOCAL_UPLOAD_FOLDER)
+                    if rel_path == '.':
+                        remote_subdir = remote_dir
+                    else:
+                        remote_subdir = f"{remote_dir}/{rel_path.replace(os.sep, '/')}"
+                        # Создаём поддиректорию на FTP
+                        try:
+                            ftp.cwd(remote_subdir)
+                        except ftplib.error_perm:
+                            parts = remote_subdir.split('/')
+                            current = ''
+                            for part in parts:
+                                current += '/' + part
+                                try:
+                                    ftp.cwd(current)
+                                except ftplib.error_perm:
+                                    ftp.mkd(part)
+                                    ftp.cwd(part)
 
-                for file in files:
-                    local_file = os.path.join(root, file)
-                    remote_file = f"{remote_subdir}/{file}"
-                    with open(local_file, 'rb') as f:
-                        ftp.storbinary(f'STOR {remote_file}', f)
-                    print(f"Uploaded {remote_file}")
-        upload_dir(LOCAL_UPLOAD_FOLDER, 'uploads')
-        ftp.quit()
-    except Exception as e:
-        print(f"FTP sync error during upload: {e}")
+                    for file in files:
+                        local_file = os.path.join(root, file)
+                        remote_file = f"{remote_subdir}/{file}"
+                        with open(local_file, 'rb') as f:
+                            ftp.storbinary(f'STOR {remote_file}', f)
+                        print(f"Uploaded {remote_file}")
+            upload_dir(LOCAL_UPLOAD_FOLDER, 'uploads')
+            ftp.quit()
+        except Exception as e:
+            print(f"FTP sync error during upload: {e}")
 
 # ---------- Декоратор для синхронизации после изменений ----------
 def sync_after_change(func):
@@ -216,41 +238,29 @@ def sync_after_change(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
         result = func(*args, **kwargs)
-        # Запускаем синхронизацию в отдельном потоке, чтобы не блокировать ответ
         threading.Thread(target=sync_to_ftp, daemon=True).start()
         return result
     return wrapper
 
+# ---------- Эндпоинты для поддержания активности и принудительной синхронизации ----------
+@app.route('/ping')
+def ping():
+    """Пустой эндпоинт для поддержания активности приложения."""
+    return 'pong', 200
+
+@app.route('/sync-ftp', methods=['POST'])
+def sync_ftp():
+    """Вызывает полную синхронизацию с FTP. Требует секретный заголовок."""
+    auth = request.headers.get('X-Sync-Secret')
+    if auth != SYNC_SECRET:
+        return 'Unauthorized', 403
+    threading.Thread(target=sync_to_ftp, daemon=True).start()
+    return 'Sync started', 202
+
 # ---------- Загрузка данных при старте ----------
-# Вызываем синхронизацию с FTP при запуске приложения
-# (но после того, как созданы папки, если они ещё не созданы)
 sync_from_ftp()
-app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-key-12345')
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///mateugram.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
-app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg', 'gif', 'mp4', 'mp3', 'pdf', 'doc', 'docx'}
 
-# Настройки почты (можно оставить)
-app.config['MAIL_SERVER'] = 'smtp.mail.ru'
-app.config['MAIL_PORT'] = 465
-app.config['MAIL_USE_SSL'] = True
-app.config['MAIL_USERNAME'] = 'mcrmateucraft@mail.ru'
-app.config['MAIL_PASSWORD'] = 'IsV6RpOYD0Yu8DLlpBvf'
-app.config['MAIL_DEFAULT_SENDER'] = app.config['MAIL_USERNAME']
-
-db = SQLAlchemy(app)
-mail = Mail(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
-login_manager = LoginManager(app)
-login_manager.login_view = 'login'
-
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-os.makedirs('photos', exist_ok=True)
-
-# -------------------- Модели --------------------
+# ---------- Модели базы данных ----------
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
@@ -325,7 +335,7 @@ class Comment(db.Model):
     content = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-# -------------------- Вспомогательные функции --------------------
+# ---------- Вспомогательные функции ----------
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
@@ -344,12 +354,7 @@ def get_chat_name(chat):
 def generate_invite_token():
     return ''.join(random.choices(string.ascii_letters + string.digits, k=20))
 
-# -------------------- Загрузчик пользователя (ОБЯЗАТЕЛЬНО) --------------------
-@login_manager.user_loader
-def load_user(user_id):
-    return db.session.get(User, int(user_id))
-
-# -------------------- Статика и favicon --------------------
+# ---------- Статика и favicon ----------
 @app.route('/photos/<filename>')
 def photos(filename):
     return send_from_directory('photos', filename)
@@ -362,7 +367,7 @@ def uploads(filename):
 def favicon():
     return send_from_directory('photos', 'logo.png', mimetype='image/vnd.microsoft.icon')
 
-# -------------------- Главная --------------------
+# ---------- Главная ----------
 @app.route('/')
 def index():
     return render_template_string(INDEX_HTML)
@@ -457,8 +462,9 @@ INDEX_HTML = '''<!DOCTYPE html>
 </body>
 </html>'''
 
-# -------------------- Регистрация --------------------
+# ---------- Регистрация ----------
 @app.route('/register', methods=['GET', 'POST'])
+@sync_after_change
 def register():
     saved_data = {'first_name': '', 'last_name': '', 'username': '',
                   'birth_day': '', 'birth_month': '', 'email': ''}
@@ -503,7 +509,6 @@ def register():
 
         db.session.add(user)
         db.session.commit()
-
         login_user(user)
         return redirect(url_for('setup_profile'))
 
@@ -613,9 +618,10 @@ REGISTER_TEMPLATE = '''
 </html>
 '''
 
-# -------------------- Настройка профиля --------------------
+# ---------- Настройка профиля ----------
 @app.route('/setup_profile', methods=['GET', 'POST'])
 @login_required
+@sync_after_change
 def setup_profile():
     if request.method == 'POST':
         if 'avatar' in request.files:
@@ -672,7 +678,7 @@ SETUP_PROFILE_HTML = '''
 </html>
 '''
 
-# -------------------- Список чатов --------------------
+# ---------- Список чатов ----------
 @app.route('/chats')
 @login_required
 def chats():
@@ -828,9 +834,10 @@ CHATS_HTML = '''
 </html>
 '''
 
-# -------------------- Создание нового чата (без каналов) --------------------
+# ---------- Создание нового чата ----------
 @app.route('/new-chat', methods=['GET', 'POST'])
 @login_required
+@sync_after_change
 def new_chat():
     selected_type = 'private'
     saved_name = ''
@@ -1092,7 +1099,7 @@ NEW_CHAT_TEMPLATE = '''
 </html>
 '''
 
-# -------------------- Чат (с кнопкой звонка на Voice) --------------------
+# ---------- Чат ----------
 @app.route('/chat/<int:chat_id>')
 @login_required
 def chat(chat_id):
@@ -1414,7 +1421,9 @@ CHAT_TEMPLATE = '''
         var editMessageId = null;
         var otherUserId = {{ other_user.id if other_user else 'null' }};
 
-        socket.on('connect', function() { socket.emit('join', {chat_id: chatId}); });
+        socket.on('connect', function() {
+            socket.emit('join', {chat_id: chatId});
+        });
 
         document.getElementById('send-btn').onclick = sendMessage;
         document.getElementById('message-input').onkeypress = function(e) {
@@ -1426,29 +1435,49 @@ CHAT_TEMPLATE = '''
             var text = input.value.trim();
             var fileInput = document.getElementById('file-upload');
             if (editMessageId) {
-                fetch('/edit_message', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message_id:editMessageId, content:text}) })
-                    .then(response=>response.json()).then(data=>{ if(data.success) location.reload(); else alert('Ошибка'); });
+                fetch('/edit_message', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({message_id: editMessageId, content: text})
+                }).then(response => response.json())
+                  .then(data => { if (data.success) location.reload(); else alert('Ошибка'); });
                 cancelEdit();
                 return;
             }
-            if (text || fileInput.files.length>0) {
-                if (fileInput.files.length>0) {
+            if (text || fileInput.files.length > 0) {
+                if (fileInput.files.length > 0) {
                     var formData = new FormData();
                     formData.append('file', fileInput.files[0]);
                     formData.append('chat_id', chatId);
                     formData.append('content', text);
                     formData.append('reply_to', replyToId);
-                    fetch('/upload', { method:'POST', body:formData })
-                        .then(response=>response.json())
-                        .then(data=>{
-                            if(data.success) {
-                                socket.emit('send_message', { chat_id:chatId, content:text, file_path:data.file_path, file_name:data.file_name, file_type:data.file_type, sender_id:userId, reply_to:replyToId });
-                                input.value=''; fileInput.value=''; cancelReply();
+                    fetch('/upload', { method: 'POST', body: formData })
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.success) {
+                                socket.emit('send_message', {
+                                    chat_id: chatId,
+                                    content: text,
+                                    file_path: data.file_path,
+                                    file_name: data.file_name,
+                                    file_type: data.file_type,
+                                    sender_id: userId,
+                                    reply_to: replyToId
+                                });
+                                input.value = '';
+                                fileInput.value = '';
+                                cancelReply();
                             } else alert('Ошибка загрузки');
                         });
                 } else {
-                    socket.emit('send_message', { chat_id:chatId, content:text, sender_id:userId, reply_to:replyToId });
-                    input.value=''; cancelReply();
+                    socket.emit('send_message', {
+                        chat_id: chatId,
+                        content: text,
+                        sender_id: userId,
+                        reply_to: replyToId
+                    });
+                    input.value = '';
+                    cancelReply();
                 }
             }
         }
@@ -1480,28 +1509,60 @@ CHAT_TEMPLATE = '''
             }
             var timeDiv = document.createElement('div');
             timeDiv.className = 'time';
-            timeDiv.innerText = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+            timeDiv.innerText = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
             msgDiv.appendChild(timeDiv);
             messagesDiv.appendChild(msgDiv);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         });
 
-        function replyTo(msgId, preview) { replyToId = msgId; document.getElementById('reply-indicator').style.display='flex'; document.getElementById('reply-text').innerText='Ответ на: '+preview; }
-        function cancelReply() { replyToId=null; document.getElementById('reply-indicator').style.display='none'; }
-        function editMessage(msgId, content) { editMessageId=msgId; document.getElementById('message-input').value=content; document.getElementById('edit-indicator').style.display='flex'; }
-        function cancelEdit() { editMessageId=null; document.getElementById('edit-indicator').style.display='none'; document.getElementById('message-input').value=''; }
-        function deleteMessage(msgId) { if(confirm('Удалить сообщение?')) fetch('/delete_message', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message_id:msgId}) }).then(response=>response.json()).then(data=>{ if(data.success) location.reload(); }); }
-        function pinMessage(msgId) { fetch('/pin_message', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message_id:msgId}) }).then(response=>response.json()).then(data=>{ if(data.success) location.reload(); }); }
-        function addReaction(msgId, emoji) { fetch('/react', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message_id:msgId, reaction:emoji}) }).then(response=>response.json()).then(data=>{ if(data.success) location.reload(); }); }
-        function forward(msgId) { var chatId = prompt('Введите ID чата для пересылки:'); if(chatId) fetch('/forward', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message_id:msgId, to_chat_id:chatId}) }).then(response=>response.json()).then(data=>{ if(data.success) alert('Переслано'); else alert('Ошибка'); }); }
-        function showComments(msgId) { window.location.href = '/message/'+msgId+'/comments'; }
-        function searchMessages() { var query = document.getElementById('search-input').value; if(query) window.location.href = '/chat/'+chatId+'/search?q='+encodeURIComponent(query); }
+        function replyTo(msgId, preview) {
+            replyToId = msgId;
+            document.getElementById('reply-indicator').style.display = 'flex';
+            document.getElementById('reply-text').innerText = 'Ответ на: ' + preview;
+        }
+        function cancelReply() { replyToId = null; document.getElementById('reply-indicator').style.display = 'none'; }
+        function editMessage(msgId, content) {
+            editMessageId = msgId;
+            document.getElementById('message-input').value = content;
+            document.getElementById('edit-indicator').style.display = 'flex';
+        }
+        function cancelEdit() {
+            editMessageId = null;
+            document.getElementById('edit-indicator').style.display = 'none';
+            document.getElementById('message-input').value = '';
+        }
+        function deleteMessage(msgId) {
+            if (confirm('Удалить сообщение?')) {
+                fetch('/delete_message', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message_id: msgId}) })
+                    .then(response => response.json()).then(data => { if (data.success) location.reload(); });
+            }
+        }
+        function pinMessage(msgId) {
+            fetch('/pin_message', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message_id: msgId}) })
+                .then(response => response.json()).then(data => { if (data.success) location.reload(); });
+        }
+        function addReaction(msgId, emoji) {
+            fetch('/react', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message_id: msgId, reaction: emoji}) })
+                .then(response => response.json()).then(data => { if (data.success) location.reload(); });
+        }
+        function forward(msgId) {
+            var chatId = prompt('Введите ID чата для пересылки:');
+            if (chatId) {
+                fetch('/forward', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message_id: msgId, to_chat_id: chatId}) })
+                    .then(response => response.json()).then(data => { if (data.success) alert('Переслано'); else alert('Ошибка'); });
+            }
+        }
+        function showComments(msgId) { window.location.href = '/message/' + msgId + '/comments'; }
+        function searchMessages() {
+            var query = document.getElementById('search-input').value;
+            if (query) window.location.href = '/chat/' + chatId + '/search?q=' + encodeURIComponent(query);
+        }
     </script>
 </body>
 </html>
 '''
 
-# -------------------- Поиск сообщений --------------------
+# ---------- Поиск сообщений ----------
 @app.route('/chat/<int:chat_id>/search')
 @login_required
 def search_messages(chat_id):
@@ -1530,9 +1591,10 @@ def search_messages(chat_id):
         </div></body></html>
     ''', messages=messages, query=query, chat_id=chat_id)
 
-# -------------------- Редактирование сообщения --------------------
+# ---------- Редактирование сообщения ----------
 @app.route('/edit_message', methods=['POST'])
 @login_required
+@sync_after_change
 def edit_message():
     data = request.get_json()
     msg_id = data.get('message_id')
@@ -1545,9 +1607,10 @@ def edit_message():
     db.session.commit()
     return jsonify({'success': True})
 
-# -------------------- Удаление сообщения --------------------
+# ---------- Удаление сообщения ----------
 @app.route('/delete_message', methods=['POST'])
 @login_required
+@sync_after_change
 def delete_message():
     data = request.get_json()
     msg_id = data.get('message_id')
@@ -1561,9 +1624,10 @@ def delete_message():
         return jsonify({'success': True})
     return jsonify({'success': False})
 
-# -------------------- Закрепление сообщения --------------------
+# ---------- Закрепление сообщения ----------
 @app.route('/pin_message', methods=['POST'])
 @login_required
+@sync_after_change
 def pin_message():
     data = request.get_json()
     msg_id = data.get('message_id')
@@ -1578,9 +1642,10 @@ def pin_message():
         return jsonify({'success': True})
     return jsonify({'success': False})
 
-# -------------------- Загрузка файлов --------------------
+# ---------- Загрузка файлов ----------
 @app.route('/upload', methods=['POST'])
 @login_required
+@sync_after_change
 def upload_file():
     if 'file' not in request.files:
         return jsonify({'success': False, 'error': 'No file'})
@@ -1595,9 +1660,10 @@ def upload_file():
         return jsonify({'success': True, 'file_path': file_path, 'file_name': file.filename, 'file_type': file_type})
     return jsonify({'success': False, 'error': 'File type not allowed'})
 
-# -------------------- Реакции --------------------
+# ---------- Реакции ----------
 @app.route('/react', methods=['POST'])
 @login_required
+@sync_after_change
 def react():
     data = request.get_json()
     message_id = data.get('message_id')
@@ -1614,9 +1680,10 @@ def react():
     db.session.commit()
     return jsonify({'success': True})
 
-# -------------------- Пересылка --------------------
+# ---------- Пересылка ----------
 @app.route('/forward', methods=['POST'])
 @login_required
+@sync_after_change
 def forward():
     data = request.get_json()
     message_id = data.get('message_id')
@@ -1650,9 +1717,10 @@ def forward():
     }, room=f"chat_{to_chat_id}")
     return jsonify({'success': True})
 
-# -------------------- Комментарии к сообщению --------------------
+# ---------- Комментарии к сообщению ----------
 @app.route('/message/<int:message_id>/comments', methods=['GET', 'POST'])
 @login_required
+@sync_after_change
 def message_comments(message_id):
     message = Message.query.get_or_404(message_id)
     membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=message.chat_id).first()
@@ -1693,7 +1761,7 @@ def message_comments(message_id):
         </div></body></html>
     ''', message=message, comments=comments)
 
-# -------------------- Информация о чате --------------------
+# ---------- Информация о чате ----------
 @app.route('/chat/<int:chat_id>/info')
 @login_required
 def chat_info(chat_id):
@@ -1733,9 +1801,10 @@ def chat_info(chat_id):
         </div></body></html>
     ''', chat=chat, members=members, member_roles=member_roles, get_chat_name=get_chat_name, membership=membership)
 
-# -------------------- Назначение роли --------------------
+# ---------- Назначение роли ----------
 @app.route('/chat/<int:chat_id>/set_role/<int:user_id>/<role>')
 @login_required
+@sync_after_change
 def set_role(chat_id, user_id, role):
     chat = Chat.query.get_or_404(chat_id)
     membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=chat_id).first()
@@ -1749,9 +1818,10 @@ def set_role(chat_id, user_id, role):
         flash('Роль изменена')
     return redirect(url_for('chat_info', chat_id=chat_id))
 
-# -------------------- Удаление участника --------------------
+# ---------- Удаление участника ----------
 @app.route('/chat/<int:chat_id>/remove/<int:user_id>')
 @login_required
+@sync_after_change
 def remove_member(chat_id, user_id):
     chat = Chat.query.get_or_404(chat_id)
     membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=chat_id).first()
@@ -1765,9 +1835,10 @@ def remove_member(chat_id, user_id):
         flash('Участник удалён')
     return redirect(url_for('chat_info', chat_id=chat_id))
 
-# -------------------- Покинуть чат --------------------
+# ---------- Покинуть чат ----------
 @app.route('/chat/<int:chat_id>/leave')
 @login_required
+@sync_after_change
 def leave_chat(chat_id):
     membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=chat_id).first()
     if membership:
@@ -1776,9 +1847,10 @@ def leave_chat(chat_id):
         flash('Вы покинули чат')
     return redirect(url_for('chats'))
 
-# -------------------- Присоединиться по ссылке --------------------
+# ---------- Присоединиться по ссылке ----------
 @app.route('/join/<token>')
 @login_required
+@sync_after_change
 def join_chat(token):
     chat = Chat.query.filter_by(invite_token=token).first()
     if not chat:
@@ -1794,9 +1866,10 @@ def join_chat(token):
         flash('Вы присоединились к чату')
     return redirect(url_for('chat', chat_id=chat.id))
 
-# -------------------- Добавление участника --------------------
+# ---------- Добавление участника ----------
 @app.route('/chat/<int:chat_id>/add_member', methods=['GET', 'POST'])
 @login_required
+@sync_after_change
 def add_member(chat_id):
     chat = Chat.query.get_or_404(chat_id)
     membership = ChatMember.query.filter_by(user_id=current_user.id, chat_id=chat_id).first()
@@ -1839,9 +1912,10 @@ def add_member(chat_id):
         </div></body></html>
     ''', chat=chat)
 
-# -------------------- Настройки профиля --------------------
+# ---------- Настройки профиля ----------
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required
+@sync_after_change
 def settings():
     if request.method == 'POST':
         first_name = request.form.get('first_name')
@@ -1900,7 +1974,7 @@ def settings():
         </div></body></html>
     ''', current_user=current_user)
 
-# -------------------- Профиль --------------------
+# ---------- Профиль ----------
 @app.route('/profile')
 @login_required
 def profile():
@@ -1929,7 +2003,7 @@ def profile():
         </div></body></html>
     ''')
 
-# -------------------- Вход --------------------
+# ---------- Вход ----------
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -1968,7 +2042,7 @@ def logout():
     logout_user()
     return redirect(url_for('index'))
 
-# -------------------- WebSocket события --------------------
+# ---------- WebSocket события ----------
 @socketio.on('join')
 def on_join(data):
     chat_id = data['chat_id']
@@ -1995,6 +2069,8 @@ def handle_message(data):
     )
     db.session.add(msg)
     db.session.commit()
+    # Синхронизация с FTP после сохранения сообщения
+    threading.Thread(target=sync_to_ftp, daemon=True).start()
     emit('new_message', {
         'content': content,
         'sender_id': sender_id,
@@ -2005,7 +2081,12 @@ def handle_message(data):
         'file_name': file_name
     }, room=f"chat_{chat_id}")
 
-# -------------------- Создание таблиц --------------------
+# ---------- Загрузчик пользователя ----------
+@login_manager.user_loader
+def load_user(user_id):
+    return db.session.get(User, int(user_id))
+
+# ---------- Создание таблиц ----------
 with app.app_context():
     db.create_all()
 
