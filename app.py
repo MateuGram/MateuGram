@@ -10,10 +10,10 @@ import secrets
 from datetime import datetime
 from pathlib import Path
 from functools import wraps
-from dotenv import load_dotenv
+# from dotenv import load_dotenv
 
 # Загружаем переменные окружения из .env файла (если он есть)
-load_dotenv()
+# load_dotenv()
 
 # Подмена sqlite3 для хостинга (если нужно)
 try:
