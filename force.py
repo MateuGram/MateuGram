@@ -2,10 +2,13 @@ import requests
 import time
 import logging
 import os
+from dotenv import load_dotenv
+
+load_dotenv()  # Загружаем переменные из .env
 
 # Настройки
 APP_URL = os.getenv('APP_URL', 'https://your-app.onrender.com')  # замените на реальный URL
-SYNC_SECRET = os.getenv('SYNC_SECRET', 'your-secret-key')          # тот же ключ, что в app.py
+SYNC_SECRET = os.getenv('SYNC_SECRET', 'your-secret-key')        # тот же ключ, что в app.py
 PING_INTERVAL = 600  # 10 минут (в секундах)
 SYNC_INTERVAL = 3600 # 1 час (в секундах)
 
